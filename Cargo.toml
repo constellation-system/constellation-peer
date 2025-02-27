@@ -1,0 +1,78 @@
+# Copyright © 2024-25 The Johns Hopkins Applied Physics Laboratory LLC.
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License, version
+# 3, as published by the Free Software Foundation.  If you
+# would like to purchase a commercial license for this software, please
+# contact APL’s Tech Transfer at 240-592-0817 or
+# techtransfer@jhuapl.edu.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public
+# License along with this program.  If not, see
+# <https://www.gnu.org/licenses/>.
+
+[package]
+name = "constellation-peer"
+description = "Peer component for the Constellation distributed systems platform"
+repository = "https://github.com/constellation-system/constellation-peer"
+version = "0.0.0"
+authors = [ "Eric McCorkle <eric.mccorkle@jhuapl.edu>" ]
+rust-version = "1.83"
+license = "AGPL-3.0-only"
+keywords = ["networking", "distributed systems", "consensus"]
+categories = ["network-programming"]
+exclude = [
+    ".gitignore"
+]
+edition = "2018"
+
+[[bin]]
+name = "constellation-peer"
+required-features = ["standalone"]
+
+[features]
+default = ["dtls", "gssapi", "log", "openssl", "socks5", "standalone", "tls", "unix"]
+dtls = ["constellation-channels/dtls"]
+gssapi = ["constellation-auth/gssapi",
+          "constellation-channels/gssapi",
+          "constellation-common/gssapi",
+          "constellation-standalone/gssapi",
+          "constellation-streams/gssapi"]
+log = ["dep:log",
+       "constellation-auth/log",
+       "constellation-channels/log",
+       "constellation-common/log",
+       "constellation-standalone?/log",
+       "constellation-streams/log"]
+openssl = ["constellation-auth/openssl",
+           "constellation-channels/openssl",
+           "constellation-common/openssl",
+           "constellation-standalone/openssl",
+           "constellation-streams/openssl"]
+socks5 = ["constellation-channels/socks5"]
+standalone = ["dep:constellation-standalone"]
+tls = ["constellation-channels/tls"]
+unix = ["constellation-auth/unix",
+        "constellation-channels/unix",
+        "constellation-common/unix",
+        "constellation-standalone/unix",
+        "constellation-streams/unix"]
+
+[dependencies]
+clap = { version = "4.5", features = ["cargo","string"] }
+constellation-auth = { git = "https://github.com/constellation-system/constellation-auth.git", branch = "devel", default-features = false }
+constellation-channels = { git = "https://github.com/constellation-system/constellation-channels.git", branch = "devel", default-features = false }
+constellation-common = { git = "https://github.com/constellation-system/constellation-common.git", branch = "devel", default-features = false }
+constellation-standalone = { git = "https://github.com/constellation-system/constellation-standalone.git", branch = "devel", default-features = false, optional = true }
+constellation-streams = { git = "https://github.com/constellation-system/constellation-streams.git", branch = "devel", default-features = false }
+log = { version = "0.4", optional = true }
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+env_logger = { version = "0.10" }
+serde_yaml = { version = "0.9" }
