@@ -16,4 +16,10 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
-fn main() {}
+//! Standalone consensus component.
+use constellation_peer::component::PeerComponent;
+use constellation_standalone::Standalone;
+
+fn main() {
+    PeerComponent::main()
+}

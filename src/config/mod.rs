@@ -16,5 +16,23 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
-pub mod component;
-pub mod config;
+use constellation_channels::config::ThreadedNSNameCachesConfig;
+use serde::Deserialize;
+use serde::Serialize;
+
+#[cfg(feature = "standalone")]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, PartialOrd, Serialize)]
+#[serde(rename = "peer-config")]
+#[serde(rename_all = "kebab-case")]
+pub struct StandaloneConfig {
+    /// Name cache configuration.
+    #[serde(default)]
+    name_caches: ThreadedNSNameCachesConfig,
+}
+
+#[cfg(feature = "standalone")]
+impl StandaloneConfig {
+    pub fn take(self) -> ThreadedNSNameCachesConfig {
+        self.name_caches
+    }
+}
