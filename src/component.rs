@@ -32,6 +32,8 @@ use constellation_common::version::Version;
 use constellation_common::version::VersionSuffix;
 #[cfg(feature = "standalone")]
 use constellation_standalone::Standalone;
+#[cfg(feature = "standalone")]
+use constellation_standalone::StandaloneService;
 use log::debug;
 use log::error;
 use log::info;
@@ -102,10 +104,8 @@ impl Standalone for PeerComponent<StandaloneCtx>
 {
     type Config = StandaloneConfig;
     type CreateCleanup = StandaloneCreateCleanup;
-    type RunCleanup = PeerComponentCleanup;
-    type RunErrorCleanup = ();
 
-    const COMPONENT_NAME: &str = "peer";
+    const NAME: &str = "peer";
     const CONFIG_FILES: &[&str] = &["peer.conf"];
     const VERSION: FullVersion = FullVersion::new(
         None,
@@ -134,6 +134,12 @@ impl Standalone for PeerComponent<StandaloneCtx>
 
         Ok((peer, cleanup))
     }
+}
+
+impl StandaloneService for PeerComponent<StandaloneCtx>
+{
+    type RunCleanup = PeerComponentCleanup;
+    type RunErrorCleanup = ();
 
     fn run(self) -> Result<Self::RunCleanup, Self::RunErrorCleanup> {
         match self.start() {
