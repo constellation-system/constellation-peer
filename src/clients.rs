@@ -16,8 +16,8 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt::Display;
 use std::fmt::Error;
@@ -57,43 +57,39 @@ pub(crate) struct ClientMsgs {
 }
 
 struct ClientSession {
-    local_shutdown: ShutdownFlag,
+    local_shutdown: ShutdownFlag
 }
 
 #[derive(Debug)]
 pub(crate) enum ClientSessionDispatchError<Prin> {
-    Exists {
-        prin: Prin
-    },
+    Exists { prin: Prin },
     MutexPoison
 }
 
 #[derive(Debug)]
 pub(crate) enum ClientSessionRecvError<Prin> {
-    NotFound {
-        prin: Prin
-    },
+    NotFound { prin: Prin },
     MutexPoison
 }
 
-unsafe impl<Prin> Send for ClientSessionDispatch<Prin>
-where
-    Prin: Clone + Display + Eq + Hash {
+unsafe impl<Prin> Send for ClientSessionDispatch<Prin> where
+    Prin: Clone + Display + Eq + Hash
+{
 }
 
-unsafe impl<Prin> Sync for ClientSessionDispatch<Prin>
-where
-    Prin: Clone + Display + Eq + Hash {
+unsafe impl<Prin> Sync for ClientSessionDispatch<Prin> where
+    Prin: Clone + Display + Eq + Hash
+{
 }
 
-unsafe impl<Prin> Send for ClientSessionRecv<Prin>
-where
-    Prin: Clone + Display + Eq + Hash {
+unsafe impl<Prin> Send for ClientSessionRecv<Prin> where
+    Prin: Clone + Display + Eq + Hash
+{
 }
 
-unsafe impl<Prin> Sync for ClientSessionRecv<Prin>
-where
-    Prin: Clone + Display + Eq + Hash {
+unsafe impl<Prin> Sync for ClientSessionRecv<Prin> where
+    Prin: Clone + Display + Eq + Hash
+{
 }
 
 impl PrivateMsgs<LargeObjMsg> for ClientMsgs {
@@ -102,7 +98,8 @@ impl PrivateMsgs<LargeObjMsg> for ClientMsgs {
 
     fn msgs(
         &mut self
-    ) -> Result<(Option<Vec<LargeObjMsg>>, Option<Instant>), Self::MsgsError> {
+    ) -> Result<(Option<Vec<LargeObjMsg>>, Option<Instant>), Self::MsgsError>
+    {
         let now = Instant::now();
         let when = now + Duration::from_secs(1);
         let out = vec![LargeObjMsg::finish(1)];
@@ -111,12 +108,11 @@ impl PrivateMsgs<LargeObjMsg> for ClientMsgs {
     }
 }
 
-
 impl<Prin> ScopedError for ClientSessionRecvError<Prin> {
     fn scope(&self) -> ErrorScope {
         match self {
             ClientSessionRecvError::NotFound { .. } => ErrorScope::Session,
-            ClientSessionRecvError::MutexPoison => ErrorScope::Unrecoverable,
+            ClientSessionRecvError::MutexPoison => ErrorScope::Unrecoverable
         }
     }
 }
@@ -132,7 +128,8 @@ impl Drop for ClientSession {
 
 impl<Prin> AuthNMsgRecv<Prin, LargeObjMsg> for ClientSessionRecv<Prin>
 where
-    Prin: Clone + Display + Eq + Hash {
+    Prin: Clone + Display + Eq + Hash
+{
     /// Errors that can occur reporting messages.
     type RecvError = ClientSessionRecvError<Prin>;
 
@@ -142,12 +139,14 @@ where
         prin: &Prin,
         msg: LargeObjMsg
     ) -> Result<(), Self::RecvError> {
-        let guard = self.sessions.read()
+        let guard = self
+            .sessions
+            .read()
             .map_err(|_| ClientSessionRecvError::MutexPoison)?;
 
-        let _ = guard.get(prin).ok_or(ClientSessionRecvError::NotFound {
-            prin: prin.clone()
-        })?;
+        let _ = guard
+            .get(prin)
+            .ok_or(ClientSessionRecvError::NotFound { prin: prin.clone() })?;
 
         debug!(target: "client-session-recv",
                "received message from {}: {:?}",
@@ -158,30 +157,33 @@ where
 
 impl<Prin> ClientSessionDispatch<Prin>
 where
-    Prin: Clone + Display + Eq + Hash {
+    Prin: Clone + Display + Eq + Hash
+{
     pub(crate) fn new() -> Self {
         let sessions = Arc::new(RwLock::new(HashMap::new()));
 
-        ClientSessionDispatch {
-            sessions: sessions
-        }
+        ClientSessionDispatch { sessions: sessions }
     }
 }
 
 impl<Prin>
-    SessionDispatch<LargeObjMsg, ClientMsgs, Prin,
-                    ClientSessionRecv<Prin>>
+    SessionDispatch<LargeObjMsg, ClientMsgs, Prin, ClientSessionRecv<Prin>>
     for ClientSessionDispatch<Prin>
 where
-    Prin: Clone + Display + Eq + Hash {
+    Prin: Clone + Display + Eq + Hash
+{
     type SessionError = ClientSessionDispatchError<Prin>;
 
     fn session(
         &self,
-        prin: Prin,
-    ) -> Result<(ShutdownFlag, ClientMsgs, Notify, ClientSessionRecv<Prin>),
-                Self::SessionError> {
-        let mut guard = self.sessions.write()
+        prin: Prin
+    ) -> Result<
+        (ShutdownFlag, ClientMsgs, Notify, ClientSessionRecv<Prin>),
+        Self::SessionError
+    > {
+        let mut guard = self
+            .sessions
+            .write()
             .map_err(|_| ClientSessionDispatchError::MutexPoison)?;
         let (local_shutdown, notify) = match guard.entry(prin.clone()) {
             Entry::Vacant(ent) => {
@@ -193,7 +195,7 @@ where
                        prin);
 
                 ent.insert(ClientSession {
-                    local_shutdown: local_shutdown.clone(),
+                    local_shutdown: local_shutdown.clone()
                 });
 
                 Ok((local_shutdown, notify))
@@ -212,33 +214,39 @@ where
 }
 
 impl<Prin> Display for ClientSessionDispatchError<Prin>
-where Prin: Display {
+where
+    Prin: Display
+{
     #[inline]
     fn fmt(
         &self,
         f: &mut Formatter<'_>
     ) -> Result<(), Error> {
         match self {
-            ClientSessionDispatchError::Exists { prin } =>
-                write!(f, "client session already exists for {}", prin),
-            ClientSessionDispatchError::MutexPoison =>
+            ClientSessionDispatchError::Exists { prin } => {
+                write!(f, "client session already exists for {}", prin)
+            }
+            ClientSessionDispatchError::MutexPoison => {
                 write!(f, "mutex poisoned")
+            }
         }
     }
 }
 
 impl<Prin> Display for ClientSessionRecvError<Prin>
-where Prin: Display {
+where
+    Prin: Display
+{
     #[inline]
     fn fmt(
         &self,
         f: &mut Formatter<'_>
     ) -> Result<(), Error> {
         match self {
-            ClientSessionRecvError::NotFound { prin } =>
-                write!(f, "no client session exists for {}", prin),
-            ClientSessionRecvError::MutexPoison =>
-                write!(f, "mutex poisoned")
+            ClientSessionRecvError::NotFound { prin } => {
+                write!(f, "no client session exists for {}", prin)
+            }
+            ClientSessionRecvError::MutexPoison => write!(f, "mutex poisoned")
         }
     }
 }

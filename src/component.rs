@@ -30,16 +30,11 @@ use constellation_auth::authn::SessionAuthN;
 use constellation_auth::authn::TrivialAuthN;
 use constellation_channels::config::CompoundFarEndpoint;
 use constellation_channels::config::ResolverConfig;
-use constellation_channels::far::FarChannelAcquired;
-use constellation_channels::far::FarChannelAcquiredResolve;
-use constellation_channels::far::FarChannelCreate;
-use constellation_channels::far::FarChannelFlowsError;
-use constellation_channels::far::FarChannelOwnedFlows;
 use constellation_channels::far::compound::CompoundFarChannel;
 use constellation_channels::far::compound::CompoundFarChannelThreadedFlows;
 use constellation_channels::far::compound::CompoundFarChannelXfrm;
-use constellation_channels::far::flows::OwnedFlowsCreate;
 use constellation_channels::far::flows::OwnedFlowNegotiator;
+use constellation_channels::far::flows::OwnedFlowsCreate;
 use constellation_channels::far::flows::ThreadedFlowsListener;
 #[cfg(feature = "standalone")]
 use constellation_channels::far::registry::CompoundFarChannelRegistry;
@@ -49,6 +44,11 @@ use constellation_channels::far::registry::FarChannelRegistryID;
 use constellation_channels::far::registry::RegistryAcquireError;
 use constellation_channels::far::udp::UDPDatagramXfrm;
 use constellation_channels::far::unix::UnixDatagramXfrm;
+use constellation_channels::far::FarChannelAcquired;
+use constellation_channels::far::FarChannelAcquiredResolve;
+use constellation_channels::far::FarChannelCreate;
+use constellation_channels::far::FarChannelFlowsError;
+use constellation_channels::far::FarChannelOwnedFlows;
 use constellation_channels::resolve::cache::NSNameCachesCtx;
 use constellation_channels::resolve::cache::ThreadedNSNameCaches;
 use constellation_channels::resolve::MixedResolver;
@@ -63,10 +63,10 @@ use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::version::FullVersion;
 use constellation_common::version::Version;
 use constellation_common::version::VersionSuffix;
-use constellation_component_common::config::DispatchCommConfig;
 use constellation_component_common::comm::dispatch::DispatchComm;
 use constellation_component_common::comm::dispatch::DispatchCommCleanup;
 use constellation_component_common::comm::dispatch::DispatchCommCreateError;
+use constellation_component_common::config::DispatchCommConfig;
 #[cfg(feature = "standalone")]
 use constellation_standalone::Standalone;
 #[cfg(feature = "standalone")]
@@ -86,10 +86,7 @@ use crate::clients::ClientSessionDispatch;
 #[cfg(feature = "standalone")]
 use crate::config::StandaloneConfig;
 
-pub type CompoundPeerComponent<
-    Epochs,
-    Ctx
-> = PeerComponent<
+pub type CompoundPeerComponent<Epochs, Ctx> = PeerComponent<
     Epochs,
     CompoundFarChannel,
     CompoundFarChannelThreadedFlows<
@@ -114,8 +111,7 @@ pub struct PeerComponent<
     Resolver,
     Endpoint,
     Ctx
->
-where
+> where
     Epochs: 'static + IDGen + Iterator<Item = u128> + Send + Sync,
     Epochs::Config: Clone + Send,
     Channel: 'static
@@ -164,10 +160,7 @@ where
     Resolver::Origin:
         Clone + Eq + Hash + Into<Option<IPEndpointAddr>> + Send + Sync,
     Endpoint: Send,
-    Ctx: 'static
-        + NSNameCachesCtx
-        + Send
-        + Sync {
+    Ctx: 'static + NSNameCachesCtx + Send + Sync {
     resolver: PhantomData<Resolver>,
     endpoint: PhantomData<Endpoint>,
     client_comm_config: DispatchCommConfig<Epochs::Config>,
@@ -219,25 +212,17 @@ pub struct StandaloneCreateCleanup {
     caches_join: JoinHandle<()>
 }
 
-impl<
-    Epochs,
-    Channel,
-    F,
-    SessionAuth,
-    Xfrm,
-    Resolver,
-    Endpoint,
-    Ctx
-> PeerComponent<
-    Epochs,
-    Channel,
-    F,
-    SessionAuth,
-    Xfrm,
-    Resolver,
-    Endpoint,
-    Ctx
->
+impl<Epochs, Channel, F, SessionAuth, Xfrm, Resolver, Endpoint, Ctx>
+    PeerComponent<
+        Epochs,
+        Channel,
+        F,
+        SessionAuth,
+        Xfrm,
+        Resolver,
+        Endpoint,
+        Ctx
+    >
 where
     Epochs: 'static + IDGen + Iterator<Item = u128> + Send + Sync,
     Epochs::Config: Clone + Send,
@@ -261,26 +246,33 @@ where
         'static + ConcurrentStream + Send,
     <Channel::Xfrm as DatagramXfrm>::PeerAddr:
         'static + Eq + Hash + Send + Sync,
-    F: 'static + OwnedFlowsCreate<
+    F: 'static
+        + OwnedFlowsCreate<
             Channel::Socket,
             Channel::Nego,
             SessionAuth,
             Channel::Xfrm
-        > + Send,
+        >
+        + Send,
     F::Flow: 'static + ConcurrentStream + Send,
     F::CreateParam: Clone + Default + Send + Sync,
     F::Reporter: Clone + Send + Sync,
     F::ChannelID: 'static + From<usize> + Into<usize> + Send + Sync,
-    SessionAuth: 'static + Clone
+    SessionAuth: 'static
+        + Clone
         + SessionAuthN<<Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow>
         + Send
         + Sync,
     SessionAuth::Prin: 'static + Clone + Display + Eq + Hash + Send,
-    Xfrm: 'static +
-        DatagramXfrm + DatagramXfrmCreate<Addr = Channel::Param> + Send + Sync,
+    Xfrm: 'static
+        + DatagramXfrm
+        + DatagramXfrmCreate<Addr = Channel::Param>
+        + Send
+        + Sync,
     Xfrm::CreateParam: Clone + Default + Send + Sync,
     Xfrm::LocalAddr: From<<Channel::Socket as Socket>::Addr>,
-    Resolver: 'static + Addrs<Addr = <Channel::Xfrm as DatagramXfrm>::PeerAddr>
+    Resolver: 'static
+        + Addrs<Addr = <Channel::Xfrm as DatagramXfrm>::PeerAddr>
         + AddrsCreate<Ctx, Vec<Endpoint>, Config = ResolverConfig>
         + Send
         + Sync,
@@ -288,11 +280,12 @@ where
         Clone + Eq + Hash + Into<Option<IPEndpointAddr>> + Send + Sync,
     Endpoint: 'static + Send,
     Ctx: 'static
-    + Clone
-    + FarChannelRegistryCtx<Channel, F, SessionAuth, Xfrm>
-    + NSNameCachesCtx
+        + Clone
+        + FarChannelRegistryCtx<Channel, F, SessionAuth, Xfrm>
+        + NSNameCachesCtx
         + Send
-        + Sync {
+        + Sync
+{
     pub fn start(
         self
     ) -> Result<
@@ -311,7 +304,7 @@ where
                 >
             >
          >
-    > {
+    >{
         let PeerComponent {
             resolver: PhantomData,
             endpoint: PhantomData,
@@ -328,16 +321,25 @@ where
         let client_comm: DispatchComm<
             LargeObjMsg,
             LargeObjMsgCodec,
-            _, _, Epochs, _, _, _, _, Resolver, Endpoint, _, _
+            _,
+            _,
+            Epochs,
+            _,
+            _,
+            _,
+            _,
+            Resolver,
+            Endpoint,
+            _,
+            _
         > = DispatchComm::create(
             client_comm_config,
             client_dispatch,
             listener,
             shutdown.clone(),
             ctx
-        ).map_err(|err| PeerComponentRunError::ClientComm {
-            err: err
-        })?;
+        )
+        .map_err(|err| PeerComponentRunError::ClientComm { err: err })?;
 
         let client_comm_cleanup = client_comm.start();
 
@@ -392,15 +394,12 @@ impl
 }
 
 #[cfg(feature = "standalone")]
-impl Standalone for CompoundPeerComponent<
-    AscendingCount,
-    StandaloneCtx
-> {
+impl Standalone for CompoundPeerComponent<AscendingCount, StandaloneCtx> {
     type Config = StandaloneConfig;
     type CreateCleanup = StandaloneCreateCleanup;
 
-    const NAME: &str = "peer";
     const CONFIG_FILES: &[&str] = &["peer.conf"];
+    const NAME: &str = "peer";
     const VERSION: FullVersion = FullVersion::new(
         None,
         Version::new(0, 0, 0),
@@ -458,10 +457,9 @@ impl Standalone for CompoundPeerComponent<
     }
 }
 
-impl StandaloneService for CompoundPeerComponent<
-    AscendingCount,
-    StandaloneCtx
-> {
+impl StandaloneService
+    for CompoundPeerComponent<AscendingCount, StandaloneCtx>
+{
     type RunCleanup = PeerComponentCleanup;
     type RunErrorCleanup = ();
 
@@ -519,7 +517,9 @@ impl StandaloneService for CompoundPeerComponent<
 }
 
 impl<Acquire> Display for PeerComponentRunError<Acquire>
-where Acquire: Display {
+where
+    Acquire: Display
+{
     fn fmt(
         &self,
         f: &mut Formatter<'_>
@@ -537,7 +537,6 @@ use constellation_channels::far::compound::CompoundFarChannelSessionCred;
 use constellation_channels::far::compound::CompoundFarChannelXfrmPeerAddr;
 use constellation_channels::far::compound::CompoundFarIPChannelXfrmPeerAddr;
 use constellation_channels::unix::UnixSocketAddr;
-
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum TestCred {

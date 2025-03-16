@@ -16,10 +16,10 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
+use constellation_channels::config::ChannelRegistryConfig;
 use constellation_channels::config::CompoundFarChannelConfig;
 use constellation_channels::config::CompoundXfrmCreateParam;
 use constellation_channels::config::ThreadedFlowsParams;
-use constellation_channels::config::ChannelRegistryConfig;
 #[cfg(feature = "standalone")]
 use constellation_channels::config::ThreadedNSNameCachesConfig;
 #[cfg(feature = "standalone")]
@@ -81,7 +81,7 @@ pub struct StandaloneConfig {
         CompoundFarChannelConfig,
         ThreadedFlowsParams,
         <AscendingCount as IDGen>::Config,
-        CompoundXfrmCreateParam<(), ()>,
+        CompoundXfrmCreateParam<(), ()>
     >
 }
 
@@ -89,14 +89,11 @@ impl<Channel, Flows, Epochs, Xfrm> PeerConfig<Channel, Flows, Epochs, Xfrm>
 where
     Epochs: Default,
     Flows: Default,
-    Xfrm: Default {
+    Xfrm: Default
+{
     #[inline]
-    pub fn new(
-        clients: ClientsConfig<Channel, Flows, Epochs, Xfrm>
-    ) -> Self {
-        PeerConfig {
-            clients: clients
-        }
+    pub fn new(clients: ClientsConfig<Channel, Flows, Epochs, Xfrm>) -> Self {
+        PeerConfig { clients: clients }
     }
 
     #[inline]
@@ -108,14 +105,14 @@ where
     pub fn take(self) -> ClientsConfig<Channel, Flows, Epochs, Xfrm> {
         self.clients
     }
-
 }
 
 impl<Channel, Flows, Epochs, Xfrm> ClientsConfig<Channel, Flows, Epochs, Xfrm>
 where
     Epochs: Default,
     Flows: Default,
-    Xfrm: Default {
+    Xfrm: Default
+{
     #[inline]
     pub fn new(
         registry: ChannelRegistryConfig<Channel, Flows, Xfrm>,
@@ -140,8 +137,10 @@ where
     #[inline]
     pub fn take(
         self
-    ) -> (ChannelRegistryConfig<Channel, Flows, Xfrm>,
-          DispatchCommConfig<Epochs>) {
+    ) -> (
+        ChannelRegistryConfig<Channel, Flows, Xfrm>,
+        DispatchCommConfig<Epochs>
+    ) {
         (self.registry, self.comm)
     }
 }
@@ -155,7 +154,7 @@ impl StandaloneConfig {
             CompoundFarChannelConfig,
             ThreadedFlowsParams,
             <AscendingCount as IDGen>::Config,
-            CompoundXfrmCreateParam<(), ()>,
+            CompoundXfrmCreateParam<(), ()>
         >
     ) -> Self {
         StandaloneConfig {
@@ -170,24 +169,29 @@ impl StandaloneConfig {
     }
 
     #[inline]
-    pub fn peer(&self) -> &PeerConfig<
+    pub fn peer(
+        &self
+    ) -> &PeerConfig<
         CompoundFarChannelConfig,
         ThreadedFlowsParams,
         <AscendingCount as IDGen>::Config,
-        CompoundXfrmCreateParam<(), ()>,
+        CompoundXfrmCreateParam<(), ()>
     > {
         &self.peer
     }
 
     #[inline]
-    pub fn take(self) ->
-        (ThreadedNSNameCachesConfig,
-         PeerConfig<
-             CompoundFarChannelConfig,
-             ThreadedFlowsParams,
-             <AscendingCount as IDGen>::Config,
-             CompoundXfrmCreateParam<(), ()>,
-         >) {
+    pub fn take(
+        self
+    ) -> (
+        ThreadedNSNameCachesConfig,
+        PeerConfig<
+            CompoundFarChannelConfig,
+            ThreadedFlowsParams,
+            <AscendingCount as IDGen>::Config,
+            CompoundXfrmCreateParam<(), ()>
+        >
+    ) {
         (self.name_caches, self.peer)
     }
 }
