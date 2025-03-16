@@ -140,7 +140,7 @@ where
     fn recv_auth_msg(
         &mut self,
         prin: &Prin,
-        _msg: LargeObjMsg
+        msg: LargeObjMsg
     ) -> Result<(), Self::RecvError> {
         let guard = self.sessions.read()
             .map_err(|_| ClientSessionRecvError::MutexPoison)?;
@@ -150,8 +150,8 @@ where
         })?;
 
         debug!(target: "client-session-recv",
-               "received message for {}",
-               prin);
+               "received message from {}: {:?}",
+               prin, msg);
         Ok(())
     }
 }

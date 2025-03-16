@@ -30,8 +30,10 @@ use constellation_auth::authn::SessionAuthN;
 use constellation_auth::authn::TrivialAuthN;
 use constellation_channels::config::CompoundFarEndpoint;
 use constellation_channels::config::ResolverConfig;
+use constellation_channels::far::FarChannelAcquired;
 use constellation_channels::far::FarChannelAcquiredResolve;
 use constellation_channels::far::FarChannelCreate;
+use constellation_channels::far::FarChannelFlowsError;
 use constellation_channels::far::FarChannelOwnedFlows;
 use constellation_channels::far::compound::CompoundFarChannel;
 use constellation_channels::far::compound::CompoundFarChannelThreadedFlows;
@@ -41,8 +43,10 @@ use constellation_channels::far::flows::OwnedFlowNegotiator;
 use constellation_channels::far::flows::ThreadedFlowsListener;
 #[cfg(feature = "standalone")]
 use constellation_channels::far::registry::CompoundFarChannelRegistry;
+use constellation_channels::far::registry::FarChannelRegistryAcquireError;
 use constellation_channels::far::registry::FarChannelRegistryCtx;
 use constellation_channels::far::registry::FarChannelRegistryID;
+use constellation_channels::far::registry::RegistryAcquireError;
 use constellation_channels::far::udp::UDPDatagramXfrm;
 use constellation_channels::far::unix::UnixDatagramXfrm;
 use constellation_channels::resolve::cache::NSNameCachesCtx;
@@ -185,10 +189,11 @@ pub struct PeerComponentCleanup {
     client_comm_cleanup: DispatchCommCleanup
 }
 
-pub enum PeerComponentRunError {
+pub enum PeerComponentRunError<Acquire> {
     ClientComm {
         err: DispatchCommCreateError<
-            <LargeObjMsgCodec as DatagramCodec<LargeObjMsg>>::CreateError
+            <LargeObjMsgCodec as DatagramCodec<LargeObjMsg>>::CreateError,
+            Acquire
         >
     }
 }
@@ -290,7 +295,23 @@ where
         + Sync {
     pub fn start(
         self
-    ) -> Result<PeerComponentCleanup, PeerComponentRunError> {
+    ) -> Result<
+        PeerComponentCleanup,
+        PeerComponentRunError<
+           FarChannelRegistryAcquireError<
+                RegistryAcquireError<
+                    Channel::AcquireError,
+                    <Channel::Acquired as FarChannelAcquiredResolve>::ResolverError,
+                    FarChannelFlowsError<
+                        Channel::SocketError,
+                        F::CreateError,
+                        Channel::XfrmError
+                    >,
+                    <Channel::Acquired as FarChannelAcquired>::WrapError
+                >
+            >
+         >
+    > {
         let PeerComponent {
             resolver: PhantomData,
             endpoint: PhantomData,
@@ -497,7 +518,8 @@ impl StandaloneService for CompoundPeerComponent<
     }
 }
 
-impl Display for PeerComponentRunError {
+impl<Acquire> Display for PeerComponentRunError<Acquire>
+where Acquire: Display {
     fn fmt(
         &self,
         f: &mut Formatter<'_>
