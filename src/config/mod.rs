@@ -26,7 +26,7 @@ use constellation_channels::config::ThreadedNSNameCachesConfig;
 use constellation_common::ids::AscendingCount;
 #[cfg(feature = "standalone")]
 use constellation_common::ids::IDGen;
-use constellation_component_common::config::DispatchCommConfig;
+use constellation_component_common::config::DispatchLargeObjBusConfig;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -58,7 +58,7 @@ where
     /// Configuration for the dispatch comm subsystem.
     #[serde(default)]
     #[serde(flatten)]
-    comm: DispatchCommConfig<Epochs>
+    comm: DispatchLargeObjBusConfig<Epochs>
 }
 
 pub type RegistryConfig = ChannelRegistryConfig<
@@ -80,7 +80,7 @@ pub struct StandaloneConfig {
     peer: PeerConfig<
         CompoundFarChannelConfig,
         ThreadedFlowsParams,
-        <AscendingCount as IDGen>::Config,
+        <AscendingCount<u128> as IDGen>::Config,
         CompoundXfrmCreateParam<(), ()>
     >
 }
@@ -116,7 +116,7 @@ where
     #[inline]
     pub fn new(
         registry: ChannelRegistryConfig<Channel, Flows, Xfrm>,
-        comm: DispatchCommConfig<Epochs>
+        comm: DispatchLargeObjBusConfig<Epochs>
     ) -> Self {
         ClientsConfig {
             registry: registry,
@@ -130,7 +130,7 @@ where
     }
 
     #[inline]
-    pub fn comm(&self) -> &DispatchCommConfig<Epochs> {
+    pub fn comm(&self) -> &DispatchLargeObjBusConfig<Epochs> {
         &self.comm
     }
 
@@ -139,7 +139,7 @@ where
         self
     ) -> (
         ChannelRegistryConfig<Channel, Flows, Xfrm>,
-        DispatchCommConfig<Epochs>
+        DispatchLargeObjBusConfig<Epochs>
     ) {
         (self.registry, self.comm)
     }
@@ -153,7 +153,7 @@ impl StandaloneConfig {
         peer: PeerConfig<
             CompoundFarChannelConfig,
             ThreadedFlowsParams,
-            <AscendingCount as IDGen>::Config,
+            <AscendingCount<u128> as IDGen>::Config,
             CompoundXfrmCreateParam<(), ()>
         >
     ) -> Self {
@@ -174,7 +174,7 @@ impl StandaloneConfig {
     ) -> &PeerConfig<
         CompoundFarChannelConfig,
         ThreadedFlowsParams,
-        <AscendingCount as IDGen>::Config,
+        <AscendingCount<u128> as IDGen>::Config,
         CompoundXfrmCreateParam<(), ()>
     > {
         &self.peer
@@ -188,7 +188,7 @@ impl StandaloneConfig {
         PeerConfig<
             CompoundFarChannelConfig,
             ThreadedFlowsParams,
-            <AscendingCount as IDGen>::Config,
+            <AscendingCount<u128> as IDGen>::Config,
             CompoundXfrmCreateParam<(), ()>
         >
     ) {

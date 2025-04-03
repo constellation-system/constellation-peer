@@ -23,32 +23,50 @@ use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
 use std::hash::Hash;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
 use std::time::Instant;
 
 use constellation_auth::authn::AuthNMsgRecv;
+use constellation_auth::authn::PassthruMsgAuthN;
 use constellation_common::error::ErrorScope;
 use constellation_common::error::ScopedError;
+use constellation_common::hashid::HashAlgo;
+use constellation_common::hashid::HashID;
+use constellation_common::hashid::SHA3ID;
+use constellation_common::ids::IDGen;
 use constellation_common::net::PrivateMsgs;
 use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::Notify;
-use constellation_component_common::comm::dispatch::SessionDispatch;
+use constellation_component_common::bus::dispatch::SessionDispatch;
+use constellation_component_common::xact::XactBatch;
+use constellation_component_common::xact::XactBatchCodec;
+use constellation_streams::frags::OutboundFrags;
+use constellation_streams::large_obj::LargeObjID;
 use constellation_streams::large_obj::LargeObjMsg;
+use constellation_streams::large_obj::LargeObjProto;
 use log::debug;
 use log::trace;
 
-pub(crate) struct ClientSessionDispatch<Prin>
+pub(crate) struct ClientSessionDispatch<H, IDs, Prin>
 where
-    Prin: Clone + Display + Eq + Hash {
+    H: HashAlgo + Send,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send,
+    IDs: IDGen + Iterator<Item = LargeObjID> + Send,
+    Prin: Clone + Display + Eq + Hash + Send + Sync {
+    hash: PhantomData<H>,
+    ids: PhantomData<IDs>,
     sessions: Arc<RwLock<HashMap<Prin, ClientSession>>>
 }
 
 #[derive(Clone)]
-pub(crate) struct ClientSessionRecv<Prin>
+pub(crate) struct ClientSessionRecv<H, Prin>
 where
+    H: Clone + Display + Hash + HashID + Eq + Send,
     Prin: Clone + Display + Eq + Hash {
+    hash: PhantomData<H>,
     sessions: Arc<RwLock<HashMap<Prin, ClientSession>>>
 }
 
@@ -72,34 +90,48 @@ pub(crate) enum ClientSessionRecvError<Prin> {
     MutexPoison
 }
 
-unsafe impl<Prin> Send for ClientSessionDispatch<Prin> where
+unsafe impl<H, IDs, Prin> Send for ClientSessionDispatch<H, IDs, Prin>
+where
+    H: HashAlgo + Send,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send,
+    IDs: IDGen + Iterator<Item = LargeObjID> + Send,
+    Prin: Clone + Display + Eq + Hash + Send + Sync
+{
+}
+
+unsafe impl<H, IDs, Prin> Sync for ClientSessionDispatch<H, IDs, Prin>
+where
+    H: HashAlgo + Send,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send,
+    IDs: IDGen + Iterator<Item = LargeObjID> + Send,
+    Prin: Clone + Display + Eq + Hash + Send + Sync
+{
+}
+
+unsafe impl<H, Prin> Send for ClientSessionRecv<H, Prin>
+where
+    H: Clone + Display + Hash + HashID + Eq + Send,
     Prin: Clone + Display + Eq + Hash
 {
 }
 
-unsafe impl<Prin> Sync for ClientSessionDispatch<Prin> where
+unsafe impl<H, Prin> Sync for ClientSessionRecv<H, Prin>
+where
+    H: Clone + Display + Hash + HashID + Eq + Send,
     Prin: Clone + Display + Eq + Hash
 {
 }
 
-unsafe impl<Prin> Send for ClientSessionRecv<Prin> where
-    Prin: Clone + Display + Eq + Hash
-{
-}
-
-unsafe impl<Prin> Sync for ClientSessionRecv<Prin> where
-    Prin: Clone + Display + Eq + Hash
-{
-}
-
-impl PrivateMsgs<LargeObjMsg> for ClientMsgs {
+impl PrivateMsgs<LargeObjMsg<SHA3ID>> for ClientMsgs {
     /// Type of errors that can occur when collecting messages.
     type MsgsError = Infallible;
 
     fn msgs(
         &mut self
-    ) -> Result<(Option<Vec<LargeObjMsg>>, Option<Instant>), Self::MsgsError>
-    {
+    ) -> Result<
+        (Option<Vec<LargeObjMsg<SHA3ID>>>, Option<Instant>),
+        Self::MsgsError
+    > {
         let now = Instant::now();
         let when = now + Duration::from_secs(1);
         let out = vec![LargeObjMsg::finish(1)];
@@ -126,8 +158,9 @@ impl Drop for ClientSession {
     }
 }
 
-impl<Prin> AuthNMsgRecv<Prin, LargeObjMsg> for ClientSessionRecv<Prin>
+impl<Prin, H> AuthNMsgRecv<Prin, XactBatch<H>> for ClientSessionRecv<H, Prin>
 where
+    H: Clone + Display + Hash + HashID + Eq + Send,
     Prin: Clone + Display + Eq + Hash
 {
     /// Errors that can occur reporting messages.
@@ -137,7 +170,7 @@ where
     fn recv_auth_msg(
         &mut self,
         prin: &Prin,
-        msg: LargeObjMsg
+        _msg: XactBatch<H>
     ) -> Result<(), Self::RecvError> {
         let guard = self
             .sessions
@@ -149,28 +182,62 @@ where
             .ok_or(ClientSessionRecvError::NotFound { prin: prin.clone() })?;
 
         debug!(target: "client-session-recv",
-               "received message from {}: {:?}",
-               prin, msg);
+               "received message from {}",
+               prin);
         Ok(())
     }
 }
 
-impl<Prin> ClientSessionDispatch<Prin>
+impl<H, IDs, Prin> ClientSessionDispatch<H, IDs, Prin>
 where
-    Prin: Clone + Display + Eq + Hash
+    H: Default + HashAlgo + Send,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send,
+    IDs: IDGen + Iterator<Item = LargeObjID> + Send,
+    Prin: Clone + Display + Eq + Hash + Send + Sync
 {
     pub(crate) fn new() -> Self {
         let sessions = Arc::new(RwLock::new(HashMap::new()));
 
-        ClientSessionDispatch { sessions: sessions }
+        ClientSessionDispatch {
+            hash: PhantomData,
+            ids: PhantomData,
+            sessions: sessions
+        }
     }
 }
 
-impl<Prin>
-    SessionDispatch<LargeObjMsg, ClientMsgs, Prin, ClientSessionRecv<Prin>>
-    for ClientSessionDispatch<Prin>
+impl<H, IDs, Prin>
+    SessionDispatch<
+        LargeObjMsg<H::HashID>,
+        LargeObjProto<
+            H::HashID,
+            XactBatch<H::HashID>,
+            XactBatch<H::HashID>,
+            PassthruMsgAuthN<XactBatch<H::HashID>, Prin>,
+            (),
+            XactBatchCodec<H>,
+            IDs,
+            ClientSessionRecv<H::HashID, Prin>,
+            OutboundFrags
+        >,
+        Prin,
+        LargeObjProto<
+            H::HashID,
+            XactBatch<H::HashID>,
+            XactBatch<H::HashID>,
+            PassthruMsgAuthN<XactBatch<H::HashID>, Prin>,
+            (),
+            XactBatchCodec<H>,
+            IDs,
+            ClientSessionRecv<H::HashID, Prin>,
+            OutboundFrags
+        >
+    > for ClientSessionDispatch<H, IDs, Prin>
 where
-    Prin: Clone + Display + Eq + Hash
+    H: Default + HashAlgo + Send,
+    H::HashID: Clone + Display + Hash + HashID + Eq + Send,
+    IDs: IDGen + Iterator<Item = LargeObjID> + Send,
+    Prin: Clone + Display + Eq + Hash + Send + Sync
 {
     type SessionError = ClientSessionDispatchError<Prin>;
 
@@ -178,7 +245,21 @@ where
         &self,
         prin: Prin
     ) -> Result<
-        (ShutdownFlag, ClientMsgs, Notify, ClientSessionRecv<Prin>),
+        (
+            ShutdownFlag,
+            Notify,
+            LargeObjProto<
+                H::HashID,
+                XactBatch<H::HashID>,
+                XactBatch<H::HashID>,
+                PassthruMsgAuthN<XactBatch<H::HashID>, Prin>,
+                (),
+                XactBatchCodec<H>,
+                IDs,
+                ClientSessionRecv<H::HashID, Prin>,
+                OutboundFrags
+            >
+        ),
         Self::SessionError
     > {
         let mut guard = self
