@@ -57,6 +57,7 @@ use constellation_channels::resolve::cache::ThreadedNSNameCaches;
 use constellation_channels::resolve::MixedResolver;
 use constellation_common::codec::Codec;
 use constellation_common::hashid::HashAlgo;
+use constellation_common::hashid::HashID;
 use constellation_common::hashid::SHA3Algo;
 use constellation_common::hashid::SHA3ID;
 use constellation_common::ids::AscendingCount;
@@ -161,7 +162,7 @@ pub struct PeerComponent<
         + SessionAuthN<<Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow>
         + Send
         + Sync,
-    SessionAuth::Prin: 'static + Clone + Display + Eq + Hash + Send,
+    SessionAuth::Prin: 'static + Clone + Display + Eq + Hash + Send + Sync,
     WrapperCodec: 'static + Clone + Codec<Wrapper> + Send,
     <WrapperCodec as Codec<Wrapper>>::Param: Default,
     Recv: 'static + AuthNMsgRecv<MsgAuth::Prin, Msg> + Clone + Send,
@@ -311,13 +312,13 @@ where
     MsgAuth::SessionPrin: Send + Sync,
     IDs: 'static + Clone + IDGen + Iterator<Item = LargeObjID> + Send,
     H: 'static + Clone + Default + HashAlgo + Send,
-    H::HashID: 'static + Clone + Display + Hash + Eq + Send,
+    H::HashID: 'static + Clone + Display + Hash + HashID + Eq + Send,
     SessionAuth: 'static
         + Clone
         + SessionAuthN<<Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow>
         + Send
         + Sync,
-    SessionAuth::Prin: 'static + Clone + Display + Eq + Hash + Send,
+    SessionAuth::Prin: 'static + Clone + Display + Eq + Hash + Send + Sync,
     WrapperCodec: 'static + Clone + Codec<Wrapper> + Send,
     <WrapperCodec as Codec<Wrapper>>::Param: Default,
     Recv: 'static + AuthNMsgRecv<MsgAuth::Prin, Msg> + Clone + Send,
@@ -397,6 +398,13 @@ where
          >
     >{
         let PeerComponent {
+            msg: PhantomData,
+            wrapper: PhantomData,
+            codec: PhantomData,
+            hash: PhantomData,
+            auth: PhantomData,
+            ids: PhantomData,
+            recv: PhantomData,
             resolver: PhantomData,
             endpoint: PhantomData,
             client_comm_config,
@@ -410,10 +418,10 @@ where
 
         let client_dispatch = ClientSessionDispatch::new();
         let client_comm: DispatchLargeObjBus<
-            LargeObjMsg<H::HashID>,
-            LargeObjMsg<H::HashID>,
-            LargeObjMsgCodec<H>,
-            _,
+            XactBatch<H::HashID>,
+            XactBatch<H::HashID>,
+            XactBatchCodec<H>,
+            H,
             IDs,
             _,
             _,
@@ -496,7 +504,7 @@ impl Standalone
         SHA3Algo,
         AscendingCount<LargeObjID>,
         PassthruMsgAuthN<XactBatch<SHA3ID>, TestCred>,
-        ClientSessionRecv<TestCred>,
+        ClientSessionRecv<SHA3ID, TestCred>,
         AscendingCount<u128>,
         StandaloneCtx
     >
@@ -542,6 +550,13 @@ impl Standalone
                     caches: caches
                 };
                 let peer = PeerComponent {
+                    msg: PhantomData,
+                    wrapper: PhantomData,
+                    codec: PhantomData,
+                    hash: PhantomData,
+                    auth: PhantomData,
+                    ids: PhantomData,
+                    recv: PhantomData,
                     resolver: PhantomData,
                     endpoint: PhantomData,
                     client_comm_config: client_comm_config,
@@ -571,7 +586,7 @@ impl StandaloneService
         SHA3Algo,
         AscendingCount<LargeObjID>,
         PassthruMsgAuthN<XactBatch<SHA3ID>, TestCred>,
-        ClientSessionRecv<TestCred>,
+        ClientSessionRecv<SHA3ID, TestCred>,
         AscendingCount<u128>,
         StandaloneCtx
     >

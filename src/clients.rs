@@ -40,7 +40,7 @@ use constellation_common::ids::IDGen;
 use constellation_common::net::PrivateMsgs;
 use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::Notify;
-use constellation_component_common::bus::dispatch::SessionDispatch;
+use constellation_component_common::bus::large_obj::dispatch::SessionDispatch;
 use constellation_component_common::xact::XactBatch;
 use constellation_component_common::xact::XactBatchCodec;
 use constellation_streams::frags::OutboundFrags;
