@@ -46,7 +46,6 @@ use constellation_streams::config::LargeObjProtoConfig;
 use constellation_streams::frags::Frags;
 use constellation_streams::frags::OutboundFrags;
 use constellation_streams::large_obj::LargeObjID;
-use constellation_streams::large_obj::LargeObjMsg;
 use constellation_streams::large_obj::LargeObjMsgs;
 use constellation_streams::large_obj::LargeObjProto;
 use constellation_streams::large_obj::LargeObjProtoAddOutboundError;
@@ -263,32 +262,15 @@ where
 
 impl<H, IDs, Prin>
     SessionDispatch<
-        LargeObjMsg<H::HashID>,
-        LargeObjProto<
-            H,
-            XactBatch<H::HashID>,
-            XactBatch<H::HashID>,
-            PassthruMsgAuthN<XactBatch<H::HashID>, Prin>,
-            (),
-            XactBatchCodec<H>,
-            IDs,
-            ClientSessionMsgs<H>,
-            ClientSessionRecv<H::HashID, Prin>,
-            OutboundFrags
-        >,
-        Prin,
-        LargeObjProto<
-            H,
-            XactBatch<H::HashID>,
-            XactBatch<H::HashID>,
-            PassthruMsgAuthN<XactBatch<H::HashID>, Prin>,
-            (),
-            XactBatchCodec<H>,
-            IDs,
-            ClientSessionMsgs<H>,
-            ClientSessionRecv<H::HashID, Prin>,
-            OutboundFrags
-        >
+        H,
+        XactBatch<H::HashID>,
+        XactBatch<H::HashID>,
+        PassthruMsgAuthN<XactBatch<H::HashID>, Prin>,
+        XactBatchCodec<H>,
+        IDs,
+        ClientSessionMsgs<H>,
+        ClientSessionRecv<H::HashID, Prin>,
+        Prin
     > for ClientSessionDispatch<H, IDs, Prin>
 where
     H: Clone + Default + HashAlgo + Send,

@@ -26,7 +26,6 @@ use std::thread::JoinHandle;
 
 #[cfg(feature = "standalone")]
 use clap::ArgMatches;
-use constellation_auth::authn::AuthNMsgRecv;
 use constellation_auth::authn::MsgAuthN;
 use constellation_auth::authn::PassthruMsgAuthN;
 use constellation_auth::authn::SessionAuthN;
@@ -86,7 +85,6 @@ use constellation_streams::channels::ChannelParam;
 use constellation_streams::config::LargeObjProtoConfig;
 use constellation_streams::large_obj::LargeObjID;
 use constellation_streams::large_obj::LargeObjMsg;
-use constellation_streams::large_obj::LargeObjMsgs;
 use constellation_streams::large_obj::LargeObjMsgCodec;
 use constellation_streams::stream::ConcurrentStream;
 use constellation_streams::stream::StreamID;
@@ -95,31 +93,23 @@ use log::error;
 use log::info;
 
 use crate::clients::ClientSessionDispatch;
-use crate::clients::ClientSessionRecv;
-use crate::clients::ClientSessionMsgs;
 #[cfg(feature = "standalone")]
 use crate::config::StandaloneConfig;
 
 pub type CompoundPeerComponent<
-    Msg,
     Wrapper,
     WrapperCodec,
     H,
     IDs,
     MsgAuth,
-    Msgs,
-    Recv,
     Epochs,
     Ctx
 > = PeerComponent<
-    Msg,
     Wrapper,
     WrapperCodec,
     H,
     IDs,
     MsgAuth,
-    Msgs,
-    Recv,
     Epochs,
     CompoundFarChannel,
     CompoundFarChannelThreadedFlows<
@@ -136,14 +126,11 @@ pub type CompoundPeerComponent<
 >;
 
 pub struct PeerComponent<
-    Msg,
     Wrapper,
     WrapperCodec,
     H,
     IDs,
     MsgAuth,
-    Msgs,
-    Recv,
     Epochs,
     Channel,
     F,
@@ -153,11 +140,14 @@ pub struct PeerComponent<
     Endpoint,
     Ctx
 > where
-    Msg: 'static + Clone + Send,
     Wrapper: 'static + Clone + Send,
     MsgAuth: 'static
         + Clone
-        + MsgAuthN<Msg, Wrapper, SessionPrin = SessionAuth::Prin>
+        + MsgAuthN<
+            XactBatch<H::HashID>,
+            Wrapper,
+            SessionPrin = SessionAuth::Prin
+        >
         + Send,
     MsgAuth::SessionPrin: Send + Sync,
     IDs: 'static + Clone + IDGen + Iterator<Item = LargeObjID> + Send,
@@ -171,8 +161,6 @@ pub struct PeerComponent<
     SessionAuth::Prin: 'static + Clone + Display + Eq + Hash + Send + Sync,
     WrapperCodec: 'static + Clone + Codec<Wrapper> + Send,
     <WrapperCodec as Codec<Wrapper>>::Param: Default,
-    Recv: 'static + AuthNMsgRecv<MsgAuth::Prin, Msg> + Clone + Send,
-    Msgs: 'static + Clone + LargeObjMsgs<H, Wrapper> + Send,
     Epochs: 'static + IDGen + Iterator<Item = u128> + Send + Sync,
     Epochs::Config: Clone + Send,
     Channel: 'static
@@ -217,18 +205,18 @@ pub struct PeerComponent<
         Clone + Eq + Hash + Into<Option<IPEndpointAddr>> + Send + Sync,
     Endpoint: Clone + Send + Sync,
     Ctx: 'static + NSNameCachesCtx + Send + Sync {
-    msg: PhantomData<Msg>,
     wrapper: PhantomData<Wrapper>,
     codec: PhantomData<WrapperCodec>,
     hash: PhantomData<H>,
     auth: PhantomData<MsgAuth>,
     ids: PhantomData<IDs>,
-    msgs: PhantomData<Msgs>,
-    recv: PhantomData<Recv>,
     resolver: PhantomData<Resolver>,
     endpoint: PhantomData<Endpoint>,
     client_comm_config: DispatchLargeObjBusConfig<Epochs::Config>,
-    large_obj_config: LargeObjProtoConfig<IDs::Config, WrapperCodec::Param>,
+    large_obj_config: LargeObjProtoConfig<
+        <XactBatchCodec<H> as Codec<XactBatch<H::HashID>>>::Param,
+        IDs::Config
+    >,
     listener: ThreadedFlowsListener<
         <Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow,
         StreamID<
@@ -278,14 +266,11 @@ pub struct StandaloneCreateCleanup {
 }
 
 impl<
-        Msg,
         Wrapper,
         WrapperCodec,
         H,
         IDs,
         MsgAuth,
-        Msgs,
-        Recv,
         Epochs,
         Channel,
         F,
@@ -296,14 +281,11 @@ impl<
         Ctx
     >
     PeerComponent<
-        Msg,
         Wrapper,
         WrapperCodec,
         H,
         IDs,
         MsgAuth,
-        Msgs,
-        Recv,
         Epochs,
         Channel,
         F,
@@ -314,11 +296,14 @@ impl<
         Ctx
     >
 where
-    Msg: 'static + Clone + Send,
     Wrapper: 'static + Clone + Send,
     MsgAuth: 'static
         + Clone
-        + MsgAuthN<Msg, Wrapper, SessionPrin = SessionAuth::Prin>
+        + MsgAuthN<
+            XactBatch<H::HashID>,
+            Wrapper,
+            SessionPrin = SessionAuth::Prin
+        >
         + Send,
     MsgAuth::SessionPrin: Send + Sync,
     IDs: 'static + Clone + IDGen + Iterator<Item = LargeObjID> + Send,
@@ -333,8 +318,6 @@ where
     SessionAuth::Prin: 'static + Clone + Display + Eq + Hash + Send + Sync,
     WrapperCodec: 'static + Clone + Codec<Wrapper> + Send,
     <WrapperCodec as Codec<Wrapper>>::Param: Default,
-    Msgs: 'static + Clone + LargeObjMsgs<H, Wrapper> + Send,
-    Recv: 'static + AuthNMsgRecv<MsgAuth::Prin, Msg> + Clone + Send,
     Epochs: 'static + IDGen + Iterator<Item = u128> + Send + Sync,
     Epochs::Config: Clone + Send,
     Channel: 'static
@@ -506,13 +489,10 @@ impl
 impl Standalone
     for CompoundPeerComponent<
         XactBatch<SHA3ID>,
-        XactBatch<SHA3ID>,
         XactBatchCodec<SHA3Algo>,
         SHA3Algo,
         AscendingCount<LargeObjID>,
         PassthruMsgAuthN<XactBatch<SHA3ID>, TestCred>,
-        ClientSessionMsgs<SHA3Algo>,
-        ClientSessionRecv<SHA3ID, TestCred>,
         AscendingCount<u128>,
         StandaloneCtx
     >
@@ -558,14 +538,11 @@ impl Standalone
                     caches: caches
                 };
                 let peer = PeerComponent {
-                    msg: PhantomData,
                     wrapper: PhantomData,
                     codec: PhantomData,
                     hash: PhantomData,
                     auth: PhantomData,
                     ids: PhantomData,
-                    msgs: PhantomData,
-                    recv: PhantomData,
                     resolver: PhantomData,
                     endpoint: PhantomData,
                     client_comm_config: client_comm_config,
@@ -591,13 +568,10 @@ impl Standalone
 impl StandaloneService
     for CompoundPeerComponent<
         XactBatch<SHA3ID>,
-        XactBatch<SHA3ID>,
         XactBatchCodec<SHA3Algo>,
         SHA3Algo,
         AscendingCount<LargeObjID>,
         PassthruMsgAuthN<XactBatch<SHA3ID>, TestCred>,
-        ClientSessionMsgs<SHA3Algo>,
-        ClientSessionRecv<SHA3ID, TestCred>,
         AscendingCount<u128>,
         StandaloneCtx
     >
