@@ -27,6 +27,7 @@ use constellation_common::ids::AscendingCount;
 #[cfg(feature = "standalone")]
 use constellation_common::ids::IDGen;
 use constellation_component_common::config::DispatchLargeObjBusConfig;
+use constellation_streams::config::LargeObjProtoConfig;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -34,23 +35,25 @@ use serde::Serialize;
 #[derive(Clone, Debug, Deserialize, PartialEq, PartialOrd, Serialize)]
 #[serde(rename = "clients")]
 #[serde(rename_all = "kebab-case")]
-pub struct PeerConfig<Channel, Flows, Epochs, Xfrm>
+pub struct PeerConfig<Channel, Flows, Epochs, LargeObj, Xfrm>
 where
     Epochs: Default,
     Flows: Default,
+    LargeObj: Default,
     Xfrm: Default {
     /// Configuration for incoming client connections.
-    clients: ClientsConfig<Channel, Flows, Epochs, Xfrm>
+    clients: ClientsConfig<Channel, Flows, Epochs, LargeObj, Xfrm>
 }
 
 #[cfg(feature = "standalone")]
 #[derive(Clone, Debug, Deserialize, PartialEq, PartialOrd, Serialize)]
 #[serde(rename = "clients")]
 #[serde(rename_all = "kebab-case")]
-pub struct ClientsConfig<Channel, Flows, Epochs, Xfrm>
+pub struct ClientsConfig<Channel, Flows, Epochs, LargeObj, Xfrm>
 where
     Epochs: Default,
     Flows: Default,
+    LargeObj: Default,
     Xfrm: Default {
     /// Channel registry configuration.
     #[serde(flatten)]
@@ -58,7 +61,9 @@ where
     /// Configuration for the dispatch comm subsystem.
     #[serde(default)]
     #[serde(flatten)]
-    comm: DispatchLargeObjBusConfig<Epochs>
+    bus: DispatchLargeObjBusConfig<Epochs>,
+    #[serde(default)]
+    large_obj: LargeObj
 }
 
 pub type RegistryConfig = ChannelRegistryConfig<
@@ -81,46 +86,59 @@ pub struct StandaloneConfig {
         CompoundFarChannelConfig,
         ThreadedFlowsParams,
         <AscendingCount<u128> as IDGen>::Config,
-        CompoundXfrmCreateParam<(), ()>
+        LargeObjProtoConfig<(), ()>,
+        CompoundXfrmCreateParam<(), ()>,
     >
 }
 
-impl<Channel, Flows, Epochs, Xfrm> PeerConfig<Channel, Flows, Epochs, Xfrm>
+impl<Channel, Flows, Epochs, LargeObj, Xfrm>
+    PeerConfig<Channel, Flows, Epochs, LargeObj, Xfrm>
 where
     Epochs: Default,
     Flows: Default,
+    LargeObj: Default,
     Xfrm: Default
 {
     #[inline]
-    pub fn new(clients: ClientsConfig<Channel, Flows, Epochs, Xfrm>) -> Self {
+    pub fn new(
+        clients: ClientsConfig<Channel, Flows, Epochs, LargeObj, Xfrm>
+    ) -> Self {
         PeerConfig { clients: clients }
     }
 
     #[inline]
-    pub fn clients(&self) -> &ClientsConfig<Channel, Flows, Epochs, Xfrm> {
+    pub fn clients(
+        &self
+    ) -> &ClientsConfig<Channel, Flows, Epochs, LargeObj, Xfrm> {
         &self.clients
     }
 
     #[inline]
-    pub fn take(self) -> ClientsConfig<Channel, Flows, Epochs, Xfrm> {
+    pub fn take(
+        self
+    ) -> ClientsConfig<Channel, Flows, Epochs, LargeObj, Xfrm> {
         self.clients
     }
 }
 
-impl<Channel, Flows, Epochs, Xfrm> ClientsConfig<Channel, Flows, Epochs, Xfrm>
+impl<Channel, Flows, Epochs, LargeObj, Xfrm>
+    ClientsConfig<Channel, Flows, Epochs, LargeObj, Xfrm>
 where
     Epochs: Default,
     Flows: Default,
+    LargeObj: Default,
     Xfrm: Default
 {
     #[inline]
     pub fn new(
         registry: ChannelRegistryConfig<Channel, Flows, Xfrm>,
-        comm: DispatchLargeObjBusConfig<Epochs>
+        bus: DispatchLargeObjBusConfig<Epochs>,
+        large_obj: LargeObj
     ) -> Self {
         ClientsConfig {
+            large_obj: large_obj,
             registry: registry,
-            comm: comm
+            bus: bus
         }
     }
 
@@ -130,8 +148,13 @@ where
     }
 
     #[inline]
-    pub fn comm(&self) -> &DispatchLargeObjBusConfig<Epochs> {
-        &self.comm
+    pub fn bus(&self) -> &DispatchLargeObjBusConfig<Epochs> {
+        &self.bus
+    }
+
+    #[inline]
+    pub fn large_obj(&self) -> &LargeObj {
+        &self.large_obj
     }
 
     #[inline]
@@ -139,9 +162,10 @@ where
         self
     ) -> (
         ChannelRegistryConfig<Channel, Flows, Xfrm>,
-        DispatchLargeObjBusConfig<Epochs>
+        DispatchLargeObjBusConfig<Epochs>,
+        LargeObj
     ) {
-        (self.registry, self.comm)
+        (self.registry, self.bus, self.large_obj)
     }
 }
 
@@ -154,6 +178,7 @@ impl StandaloneConfig {
             CompoundFarChannelConfig,
             ThreadedFlowsParams,
             <AscendingCount<u128> as IDGen>::Config,
+            LargeObjProtoConfig<(), ()>,
             CompoundXfrmCreateParam<(), ()>
         >
     ) -> Self {
@@ -175,7 +200,8 @@ impl StandaloneConfig {
         CompoundFarChannelConfig,
         ThreadedFlowsParams,
         <AscendingCount<u128> as IDGen>::Config,
-        CompoundXfrmCreateParam<(), ()>
+        LargeObjProtoConfig<(), ()>,
+        CompoundXfrmCreateParam<(), ()>,
     > {
         &self.peer
     }
@@ -189,7 +215,8 @@ impl StandaloneConfig {
             CompoundFarChannelConfig,
             ThreadedFlowsParams,
             <AscendingCount<u128> as IDGen>::Config,
-            CompoundXfrmCreateParam<(), ()>
+            LargeObjProtoConfig<(), ()>,
+            CompoundXfrmCreateParam<(), ()>,
         >
     ) {
         (self.name_caches, self.peer)

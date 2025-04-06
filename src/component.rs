@@ -83,8 +83,10 @@ use constellation_standalone::StandaloneService;
 use constellation_streams::addrs::Addrs;
 use constellation_streams::addrs::AddrsCreate;
 use constellation_streams::channels::ChannelParam;
+use constellation_streams::config::LargeObjProtoConfig;
 use constellation_streams::large_obj::LargeObjID;
 use constellation_streams::large_obj::LargeObjMsg;
+use constellation_streams::large_obj::LargeObjMsgs;
 use constellation_streams::large_obj::LargeObjMsgCodec;
 use constellation_streams::stream::ConcurrentStream;
 use constellation_streams::stream::StreamID;
@@ -94,6 +96,7 @@ use log::info;
 
 use crate::clients::ClientSessionDispatch;
 use crate::clients::ClientSessionRecv;
+use crate::clients::ClientSessionMsgs;
 #[cfg(feature = "standalone")]
 use crate::config::StandaloneConfig;
 
@@ -104,6 +107,7 @@ pub type CompoundPeerComponent<
     H,
     IDs,
     MsgAuth,
+    Msgs,
     Recv,
     Epochs,
     Ctx
@@ -114,6 +118,7 @@ pub type CompoundPeerComponent<
     H,
     IDs,
     MsgAuth,
+    Msgs,
     Recv,
     Epochs,
     CompoundFarChannel,
@@ -137,6 +142,7 @@ pub struct PeerComponent<
     H,
     IDs,
     MsgAuth,
+    Msgs,
     Recv,
     Epochs,
     Channel,
@@ -166,6 +172,7 @@ pub struct PeerComponent<
     WrapperCodec: 'static + Clone + Codec<Wrapper> + Send,
     <WrapperCodec as Codec<Wrapper>>::Param: Default,
     Recv: 'static + AuthNMsgRecv<MsgAuth::Prin, Msg> + Clone + Send,
+    Msgs: 'static + Clone + LargeObjMsgs<H, Wrapper> + Send,
     Epochs: 'static + IDGen + Iterator<Item = u128> + Send + Sync,
     Epochs::Config: Clone + Send,
     Channel: 'static
@@ -216,10 +223,12 @@ pub struct PeerComponent<
     hash: PhantomData<H>,
     auth: PhantomData<MsgAuth>,
     ids: PhantomData<IDs>,
+    msgs: PhantomData<Msgs>,
     recv: PhantomData<Recv>,
     resolver: PhantomData<Resolver>,
     endpoint: PhantomData<Endpoint>,
     client_comm_config: DispatchLargeObjBusConfig<Epochs::Config>,
+    large_obj_config: LargeObjProtoConfig<IDs::Config, WrapperCodec::Param>,
     listener: ThreadedFlowsListener<
         <Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow,
         StreamID<
@@ -275,6 +284,7 @@ impl<
         H,
         IDs,
         MsgAuth,
+        Msgs,
         Recv,
         Epochs,
         Channel,
@@ -292,6 +302,7 @@ impl<
         H,
         IDs,
         MsgAuth,
+        Msgs,
         Recv,
         Epochs,
         Channel,
@@ -311,6 +322,7 @@ where
         + Send,
     MsgAuth::SessionPrin: Send + Sync,
     IDs: 'static + Clone + IDGen + Iterator<Item = LargeObjID> + Send,
+    IDs::Config: Clone,
     H: 'static + Clone + Default + HashAlgo + Send,
     H::HashID: 'static + Clone + Display + Hash + HashID + Eq + Send,
     SessionAuth: 'static
@@ -321,6 +333,7 @@ where
     SessionAuth::Prin: 'static + Clone + Display + Eq + Hash + Send + Sync,
     WrapperCodec: 'static + Clone + Codec<Wrapper> + Send,
     <WrapperCodec as Codec<Wrapper>>::Param: Default,
+    Msgs: 'static + Clone + LargeObjMsgs<H, Wrapper> + Send,
     Recv: 'static + AuthNMsgRecv<MsgAuth::Prin, Msg> + Clone + Send,
     Epochs: 'static + IDGen + Iterator<Item = u128> + Send + Sync,
     Epochs::Config: Clone + Send,
@@ -398,31 +411,25 @@ where
          >
     >{
         let PeerComponent {
-            msg: PhantomData,
-            wrapper: PhantomData,
-            codec: PhantomData,
-            hash: PhantomData,
-            auth: PhantomData,
-            ids: PhantomData,
-            recv: PhantomData,
-            resolver: PhantomData,
-            endpoint: PhantomData,
             client_comm_config,
+            large_obj_config,
             listener,
             shutdown,
-            ctx
+            ctx,
+            ..
         } = self;
 
         info!(target: "peer-component",
               "starting peer component");
 
-        let client_dispatch = ClientSessionDispatch::new();
+        let client_dispatch = ClientSessionDispatch::new(large_obj_config);
         let client_comm: DispatchLargeObjBus<
             XactBatch<H::HashID>,
             XactBatch<H::HashID>,
             XactBatchCodec<H>,
             H,
             IDs,
+            _,
             _,
             _,
             Epochs,
@@ -504,6 +511,7 @@ impl Standalone
         SHA3Algo,
         AscendingCount<LargeObjID>,
         PassthruMsgAuthN<XactBatch<SHA3ID>, TestCred>,
+        ClientSessionMsgs<SHA3Algo>,
         ClientSessionRecv<SHA3ID, TestCred>,
         AscendingCount<u128>,
         StandaloneCtx
@@ -526,7 +534,7 @@ impl Standalone
     ) -> Result<(Self, Self::CreateCleanup), Self::CreateCleanup> {
         let (name_caches_config, peer_config) = config.take();
         let clients_config = peer_config.take();
-        let (client_registry_config, client_comm_config) =
+        let (client_registry_config, client_comm_config, large_obj_config) =
             clients_config.take();
         let shutdown = ShutdownFlag::new();
         let (mut caches, caches_join) =
@@ -556,10 +564,12 @@ impl Standalone
                     hash: PhantomData,
                     auth: PhantomData,
                     ids: PhantomData,
+                    msgs: PhantomData,
                     recv: PhantomData,
                     resolver: PhantomData,
                     endpoint: PhantomData,
                     client_comm_config: client_comm_config,
+                    large_obj_config: large_obj_config,
                     shutdown: shutdown,
                     listener: listener,
                     ctx: ctx
@@ -586,6 +596,7 @@ impl StandaloneService
         SHA3Algo,
         AscendingCount<LargeObjID>,
         PassthruMsgAuthN<XactBatch<SHA3ID>, TestCred>,
+        ClientSessionMsgs<SHA3Algo>,
         ClientSessionRecv<SHA3ID, TestCred>,
         AscendingCount<u128>,
         StandaloneCtx
