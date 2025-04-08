@@ -87,7 +87,7 @@ pub struct StandaloneConfig {
         ThreadedFlowsParams,
         <AscendingCount<u128> as IDGen>::Config,
         LargeObjProtoConfig<(), ()>,
-        CompoundXfrmCreateParam<(), ()>,
+        CompoundXfrmCreateParam<(), ()>
     >
 }
 
@@ -114,9 +114,7 @@ where
     }
 
     #[inline]
-    pub fn take(
-        self
-    ) -> ClientsConfig<Channel, Flows, Epochs, LargeObj, Xfrm> {
+    pub fn take(self) -> ClientsConfig<Channel, Flows, Epochs, LargeObj, Xfrm> {
         self.clients
     }
 }
@@ -201,7 +199,7 @@ impl StandaloneConfig {
         ThreadedFlowsParams,
         <AscendingCount<u128> as IDGen>::Config,
         LargeObjProtoConfig<(), ()>,
-        CompoundXfrmCreateParam<(), ()>,
+        CompoundXfrmCreateParam<(), ()>
     > {
         &self.peer
     }
@@ -216,7 +214,7 @@ impl StandaloneConfig {
             ThreadedFlowsParams,
             <AscendingCount<u128> as IDGen>::Config,
             LargeObjProtoConfig<(), ()>,
-            CompoundXfrmCreateParam<(), ()>,
+            CompoundXfrmCreateParam<(), ()>
         >
     ) {
         (self.name_caches, self.peer)

@@ -143,11 +143,7 @@ pub struct PeerComponent<
     Wrapper: 'static + Clone + Send,
     MsgAuth: 'static
         + Clone
-        + MsgAuthN<
-            XactBatch<H::HashID>,
-            Wrapper,
-            SessionPrin = SessionAuth::Prin
-        >
+        + MsgAuthN<XactBatch<H::HashID>, Wrapper, SessionPrin = SessionAuth::Prin>
         + Send,
     MsgAuth::SessionPrin: Send + Sync,
     IDs: 'static + Clone + IDGen + Iterator<Item = LargeObjID> + Send,
@@ -299,11 +295,7 @@ where
     Wrapper: 'static + Clone + Send,
     MsgAuth: 'static
         + Clone
-        + MsgAuthN<
-            XactBatch<H::HashID>,
-            Wrapper,
-            SessionPrin = SessionAuth::Prin
-        >
+        + MsgAuthN<XactBatch<H::HashID>, Wrapper, SessionPrin = SessionAuth::Prin>
         + Send,
     MsgAuth::SessionPrin: Send + Sync,
     IDs: 'static + Clone + IDGen + Iterator<Item = LargeObjID> + Send,

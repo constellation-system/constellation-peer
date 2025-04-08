@@ -84,8 +84,9 @@ pub(crate) struct ClientSessionMsgs<H>
 where
     H: HashAlgo {
     notify: Notify,
+    when: Instant,
     count: u64,
-    hash: H,
+    hash: H
 }
 
 struct ClientSession {
@@ -97,7 +98,9 @@ pub(crate) enum ClientSessionDispatchError<Prin, Codec> {
     Proto {
         err: LargeObjProtoCreateError<Codec>
     },
-    Exists { prin: Prin },
+    Exists {
+        prin: Prin
+    },
     MutexPoison
 }
 
@@ -146,44 +149,39 @@ where
     H: Clone + HashAlgo,
     H::HashID: Clone + Display + Hash + HashID + Eq
 {
-    type AddMsgsError<ID, Encode> = LargeObjProtoAddOutboundError<
-        ID,
-        H::HashID,
-        Encode
-    >
-    where ID: Display,
-          Encode: Display + ScopedError;
-
-    fn add_msgs<WrapperCodec, IDs, F>(
-        &mut self,
-        sender: &mut LargeObjSender<
-            H,
-            XactBatch<H::HashID>,
-            WrapperCodec,
-            IDs,
-            F
-        >
-    ) -> Result<
-        Option<Instant>,
-        Self::AddMsgsError<IDs::Item, WrapperCodec::EncodeError>
-    >
+    type AddMsgsError<Encode>
+        = LargeObjProtoAddOutboundError<H::HashID, Encode>
     where
-        IDs: IDGen + Iterator<Item = LargeObjID>,
+        Encode: Display + ScopedError;
+
+    fn add_msgs<WrapperCodec, F>(
+        &mut self,
+        sender: &mut LargeObjSender<H, XactBatch<H::HashID>, WrapperCodec, F>
+    ) -> Result<Option<Instant>, Self::AddMsgsError<WrapperCodec::EncodeError>>
+    where
         WrapperCodec: Clone + Codec<XactBatch<H::HashID>>,
         WrapperCodec::Param: Default,
         F: Frags {
-        let batch = XactBatch::create(
-            &self.hash,
-            self.count,
-            once(vec![0x55; 512])
-        );
+        let now = Instant::now();
 
-        sender.add_outbound(&batch)?;
-        self.count += 1;
+        if now >= self.when {
+            debug!(target: "peer-clinet-msgs",
+                   "generating outgoing batch, seqnum {}",
+                   self.count);
 
-        let when = Instant::now() + Duration::from_secs(5);
+            let batch = XactBatch::create(
+                &self.hash,
+                self.count,
+                once(vec![0x11; 10000])
+            );
 
-        Ok(Some(when))
+            sender.add_outbound(&batch)?;
+            self.count += 1;
+
+            self.when = now + Duration::from_secs(5);
+        }
+
+        Ok(Some(self.when))
     }
 }
 
@@ -217,7 +215,7 @@ where
     fn recv_auth_msg(
         &mut self,
         prin: &Prin,
-        _msg: XactBatch<H>
+        msg: XactBatch<H>
     ) -> Result<(), Self::RecvError> {
         let guard = self
             .sessions
@@ -227,10 +225,18 @@ where
         let _ = guard
             .get(prin)
             .ok_or(ClientSessionRecvError::NotFound { prin: prin.clone() })?;
+        let (seqnum, reqs) = msg.take();
 
         debug!(target: "client-session-recv",
-               "received message from {}",
-               prin);
+               "received message from {}, batch {} with {} reqs",
+               prin, seqnum, reqs.len());
+
+        for req in reqs {
+            debug!(target: "client-session-recv",
+                   "req {}: {:?}",
+                   req.hash(), req.data());
+        }
+
         Ok(())
     }
 }
@@ -330,23 +336,20 @@ where
         let hash = H::default();
         let recv = ClientSessionRecv {
             hash: PhantomData,
-            sessions: self.sessions.clone(),
+            sessions: self.sessions.clone()
         };
         let msgs = ClientSessionMsgs {
             notify: notify.clone(),
+            when: Instant::now(),
             hash: hash.clone(),
             count: 0
         };
         let authn = PassthruMsgAuthN::default();
-        let proto = LargeObjProto::create(
-            self.config.clone(),
-            recv,
-            msgs,
-            authn,
-            hash
-        ).map_err(|err| ClientSessionDispatchError::Proto {
-            err: err
-        })?;
+        let proto =
+            LargeObjProto::create(self.config.clone(), recv, msgs, authn, hash)
+                .map_err(|err| ClientSessionDispatchError::Proto {
+                    err: err
+                })?;
 
         Ok((local_shutdown, notify, proto))
     }
