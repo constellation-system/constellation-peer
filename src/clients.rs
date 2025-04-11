@@ -164,7 +164,7 @@ where
         F: Frags {
         let now = Instant::now();
 
-        if now >= self.when {
+        if self.when <= now {
             debug!(target: "peer-clinet-msgs",
                    "generating outgoing batch, seqnum {}",
                    self.count);
