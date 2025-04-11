@@ -26,6 +26,8 @@ use std::thread::JoinHandle;
 
 #[cfg(feature = "standalone")]
 use clap::ArgMatches;
+use constellation_auth::authn::MsgAuthN;
+use constellation_auth::authn::PassthruMsgAuthN;
 use constellation_auth::authn::SessionAuthN;
 use constellation_auth::authn::TrivialAuthN;
 use constellation_channels::config::CompoundFarEndpoint;
@@ -52,7 +54,11 @@ use constellation_channels::far::FarChannelOwnedFlows;
 use constellation_channels::resolve::cache::NSNameCachesCtx;
 use constellation_channels::resolve::cache::ThreadedNSNameCaches;
 use constellation_channels::resolve::MixedResolver;
-use constellation_common::codec::DatagramCodec;
+use constellation_common::codec::Codec;
+use constellation_common::hashid::HashAlgo;
+use constellation_common::hashid::HashID;
+use constellation_common::hashid::SHA3Algo;
+use constellation_common::hashid::SHA3ID;
 use constellation_common::ids::AscendingCount;
 use constellation_common::ids::IDGen;
 use constellation_common::net::DatagramXfrm;
@@ -63,10 +69,12 @@ use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::version::FullVersion;
 use constellation_common::version::Version;
 use constellation_common::version::VersionSuffix;
-use constellation_component_common::comm::dispatch::DispatchComm;
-use constellation_component_common::comm::dispatch::DispatchCommCleanup;
-use constellation_component_common::comm::dispatch::DispatchCommCreateError;
-use constellation_component_common::config::DispatchCommConfig;
+use constellation_component_common::bus::large_obj::dispatch::DispatchLargeObjBus;
+use constellation_component_common::bus::large_obj::dispatch::DispatchLargeObjBusCleanup;
+use constellation_component_common::bus::large_obj::dispatch::DispatchLargeObjBusCreateError;
+use constellation_component_common::config::DispatchLargeObjBusConfig;
+use constellation_component_common::xact::XactBatch;
+use constellation_component_common::xact::XactBatchCodec;
 #[cfg(feature = "standalone")]
 use constellation_standalone::Standalone;
 #[cfg(feature = "standalone")]
@@ -74,6 +82,8 @@ use constellation_standalone::StandaloneService;
 use constellation_streams::addrs::Addrs;
 use constellation_streams::addrs::AddrsCreate;
 use constellation_streams::channels::ChannelParam;
+use constellation_streams::config::LargeObjProtoConfig;
+use constellation_streams::large_obj::LargeObjID;
 use constellation_streams::large_obj::LargeObjMsg;
 use constellation_streams::large_obj::LargeObjMsgCodec;
 use constellation_streams::stream::ConcurrentStream;
@@ -86,7 +96,20 @@ use crate::clients::ClientSessionDispatch;
 #[cfg(feature = "standalone")]
 use crate::config::StandaloneConfig;
 
-pub type CompoundPeerComponent<Epochs, Ctx> = PeerComponent<
+pub type CompoundPeerComponent<
+    Wrapper,
+    WrapperCodec,
+    H,
+    IDs,
+    MsgAuth,
+    Epochs,
+    Ctx
+> = PeerComponent<
+    Wrapper,
+    WrapperCodec,
+    H,
+    IDs,
+    MsgAuth,
     Epochs,
     CompoundFarChannel,
     CompoundFarChannelThreadedFlows<
@@ -103,6 +126,11 @@ pub type CompoundPeerComponent<Epochs, Ctx> = PeerComponent<
 >;
 
 pub struct PeerComponent<
+    Wrapper,
+    WrapperCodec,
+    H,
+    IDs,
+    MsgAuth,
     Epochs,
     Channel,
     F,
@@ -112,6 +140,23 @@ pub struct PeerComponent<
     Endpoint,
     Ctx
 > where
+    Wrapper: 'static + Clone + Send,
+    MsgAuth: 'static
+        + Clone
+        + MsgAuthN<XactBatch<H::HashID>, Wrapper, SessionPrin = SessionAuth::Prin>
+        + Send,
+    MsgAuth::SessionPrin: Send + Sync,
+    IDs: 'static + Clone + IDGen + Iterator<Item = LargeObjID> + Send,
+    H: 'static + Clone + Default + HashAlgo + Send,
+    H::HashID: 'static + Clone + Display + Hash + Eq + Send,
+    SessionAuth: 'static
+        + Clone
+        + SessionAuthN<<Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow>
+        + Send
+        + Sync,
+    SessionAuth::Prin: 'static + Clone + Display + Eq + Hash + Send + Sync,
+    WrapperCodec: 'static + Clone + Codec<Wrapper> + Send,
+    <WrapperCodec as Codec<Wrapper>>::Param: Default,
     Epochs: 'static + IDGen + Iterator<Item = u128> + Send + Sync,
     Epochs::Config: Clone + Send,
     Channel: 'static
@@ -144,11 +189,6 @@ pub struct PeerComponent<
     F::CreateParam: Clone + Default + Send + Sync,
     F::Reporter: Clone + Send + Sync,
     F::ChannelID: 'static + From<usize> + Into<usize> + Send + Sync,
-    SessionAuth: Clone
-        + SessionAuthN<<Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow>
-        + Send
-        + Sync,
-    SessionAuth::Prin: 'static + Clone + Display + Eq + Hash + Send,
     Xfrm:
         DatagramXfrm + DatagramXfrmCreate<Addr = Channel::Param> + Send + Sync,
     Xfrm::CreateParam: Clone + Default + Send + Sync,
@@ -159,11 +199,20 @@ pub struct PeerComponent<
         + Sync,
     Resolver::Origin:
         Clone + Eq + Hash + Into<Option<IPEndpointAddr>> + Send + Sync,
-    Endpoint: Send,
+    Endpoint: Clone + Send + Sync,
     Ctx: 'static + NSNameCachesCtx + Send + Sync {
+    wrapper: PhantomData<Wrapper>,
+    codec: PhantomData<WrapperCodec>,
+    hash: PhantomData<H>,
+    auth: PhantomData<MsgAuth>,
+    ids: PhantomData<IDs>,
     resolver: PhantomData<Resolver>,
     endpoint: PhantomData<Endpoint>,
-    client_comm_config: DispatchCommConfig<Epochs::Config>,
+    client_comm_config: DispatchLargeObjBusConfig<Epochs::Config>,
+    large_obj_config: LargeObjProtoConfig<
+        <XactBatchCodec<H> as Codec<XactBatch<H::HashID>>>::Param,
+        IDs::Config
+    >,
     listener: ThreadedFlowsListener<
         <Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow,
         StreamID<
@@ -179,13 +228,13 @@ pub struct PeerComponent<
 
 pub struct PeerComponentCleanup {
     shutdown: ShutdownFlag,
-    client_comm_cleanup: DispatchCommCleanup
+    client_comm_cleanup: DispatchLargeObjBusCleanup
 }
 
 pub enum PeerComponentRunError<Acquire> {
     ClientComm {
-        err: DispatchCommCreateError<
-            <LargeObjMsgCodec as DatagramCodec<LargeObjMsg>>::CreateError,
+        err: DispatchLargeObjBusCreateError<
+            <LargeObjMsgCodec<SHA3Algo> as Codec<LargeObjMsg<SHA3ID>>>::CreateError,
             Acquire
         >
     }
@@ -212,8 +261,27 @@ pub struct StandaloneCreateCleanup {
     caches_join: JoinHandle<()>
 }
 
-impl<Epochs, Channel, F, SessionAuth, Xfrm, Resolver, Endpoint, Ctx>
+impl<
+        Wrapper,
+        WrapperCodec,
+        H,
+        IDs,
+        MsgAuth,
+        Epochs,
+        Channel,
+        F,
+        SessionAuth,
+        Xfrm,
+        Resolver,
+        Endpoint,
+        Ctx
+    >
     PeerComponent<
+        Wrapper,
+        WrapperCodec,
+        H,
+        IDs,
+        MsgAuth,
         Epochs,
         Channel,
         F,
@@ -224,6 +292,24 @@ impl<Epochs, Channel, F, SessionAuth, Xfrm, Resolver, Endpoint, Ctx>
         Ctx
     >
 where
+    Wrapper: 'static + Clone + Send,
+    MsgAuth: 'static
+        + Clone
+        + MsgAuthN<XactBatch<H::HashID>, Wrapper, SessionPrin = SessionAuth::Prin>
+        + Send,
+    MsgAuth::SessionPrin: Send + Sync,
+    IDs: 'static + Clone + IDGen + Iterator<Item = LargeObjID> + Send,
+    IDs::Config: Clone,
+    H: 'static + Clone + Default + HashAlgo + Send,
+    H::HashID: 'static + Clone + Display + Hash + HashID + Eq + Send,
+    SessionAuth: 'static
+        + Clone
+        + SessionAuthN<<Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow>
+        + Send
+        + Sync,
+    SessionAuth::Prin: 'static + Clone + Display + Eq + Hash + Send + Sync,
+    WrapperCodec: 'static + Clone + Codec<Wrapper> + Send,
+    <WrapperCodec as Codec<Wrapper>>::Param: Default,
     Epochs: 'static + IDGen + Iterator<Item = u128> + Send + Sync,
     Epochs::Config: Clone + Send,
     Channel: 'static
@@ -258,12 +344,6 @@ where
     F::CreateParam: Clone + Default + Send + Sync,
     F::Reporter: Clone + Send + Sync,
     F::ChannelID: 'static + From<usize> + Into<usize> + Send + Sync,
-    SessionAuth: 'static
-        + Clone
-        + SessionAuthN<<Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow>
-        + Send
-        + Sync,
-    SessionAuth::Prin: 'static + Clone + Display + Eq + Hash + Send,
     Xfrm: 'static
         + DatagramXfrm
         + DatagramXfrmCreate<Addr = Channel::Param>
@@ -278,7 +358,7 @@ where
         + Sync,
     Resolver::Origin:
         Clone + Eq + Hash + Into<Option<IPEndpointAddr>> + Send + Sync,
-    Endpoint: 'static + Send,
+    Endpoint: 'static + Clone + Send + Sync,
     Ctx: 'static
         + Clone
         + FarChannelRegistryCtx<Channel, F, SessionAuth, Xfrm>
@@ -306,21 +386,25 @@ where
          >
     >{
         let PeerComponent {
-            resolver: PhantomData,
-            endpoint: PhantomData,
             client_comm_config,
+            large_obj_config,
             listener,
             shutdown,
-            ctx
+            ctx,
+            ..
         } = self;
 
         info!(target: "peer-component",
               "starting peer component");
 
-        let client_dispatch = ClientSessionDispatch::new();
-        let client_comm: DispatchComm<
-            LargeObjMsg,
-            LargeObjMsgCodec,
+        let client_dispatch = ClientSessionDispatch::new(large_obj_config);
+        let client_comm: DispatchLargeObjBus<
+            XactBatch<H::HashID>,
+            XactBatch<H::HashID>,
+            XactBatchCodec<H>,
+            H,
+            IDs,
+            _,
             _,
             _,
             Epochs,
@@ -332,7 +416,7 @@ where
             Endpoint,
             _,
             _
-        > = DispatchComm::create(
+        > = DispatchLargeObjBus::create(
             client_comm_config,
             client_dispatch,
             listener,
@@ -394,7 +478,17 @@ impl
 }
 
 #[cfg(feature = "standalone")]
-impl Standalone for CompoundPeerComponent<AscendingCount, StandaloneCtx> {
+impl Standalone
+    for CompoundPeerComponent<
+        XactBatch<SHA3ID>,
+        XactBatchCodec<SHA3Algo>,
+        SHA3Algo,
+        AscendingCount<LargeObjID>,
+        PassthruMsgAuthN<XactBatch<SHA3ID>, TestCred>,
+        AscendingCount<u128>,
+        StandaloneCtx
+    >
+{
     type Config = StandaloneConfig;
     type CreateCleanup = StandaloneCreateCleanup;
 
@@ -412,7 +506,7 @@ impl Standalone for CompoundPeerComponent<AscendingCount, StandaloneCtx> {
     ) -> Result<(Self, Self::CreateCleanup), Self::CreateCleanup> {
         let (name_caches_config, peer_config) = config.take();
         let clients_config = peer_config.take();
-        let (client_registry_config, client_comm_config) =
+        let (client_registry_config, client_comm_config, large_obj_config) =
             clients_config.take();
         let shutdown = ShutdownFlag::new();
         let (mut caches, caches_join) =
@@ -436,9 +530,15 @@ impl Standalone for CompoundPeerComponent<AscendingCount, StandaloneCtx> {
                     caches: caches
                 };
                 let peer = PeerComponent {
+                    wrapper: PhantomData,
+                    codec: PhantomData,
+                    hash: PhantomData,
+                    auth: PhantomData,
+                    ids: PhantomData,
                     resolver: PhantomData,
                     endpoint: PhantomData,
                     client_comm_config: client_comm_config,
+                    large_obj_config: large_obj_config,
                     shutdown: shutdown,
                     listener: listener,
                     ctx: ctx
@@ -458,7 +558,15 @@ impl Standalone for CompoundPeerComponent<AscendingCount, StandaloneCtx> {
 }
 
 impl StandaloneService
-    for CompoundPeerComponent<AscendingCount, StandaloneCtx>
+    for CompoundPeerComponent<
+        XactBatch<SHA3ID>,
+        XactBatchCodec<SHA3Algo>,
+        SHA3Algo,
+        AscendingCount<LargeObjID>,
+        PassthruMsgAuthN<XactBatch<SHA3ID>, TestCred>,
+        AscendingCount<u128>,
+        StandaloneCtx
+    >
 {
     type RunCleanup = PeerComponentCleanup;
     type RunErrorCleanup = ();
