@@ -165,7 +165,7 @@ where
         let now = Instant::now();
 
         if self.when <= now {
-            debug!(target: "peer-clinet-msgs",
+            debug!(target: "peer-client-msgs",
                    "generating outgoing batch, seqnum {}",
                    self.count);
 
@@ -345,11 +345,15 @@ where
             count: 0
         };
         let authn = PassthruMsgAuthN::default();
-        let proto =
-            LargeObjProto::create(self.config.clone(), recv, msgs, authn, hash)
-                .map_err(|err| ClientSessionDispatchError::Proto {
-                    err: err
-                })?;
+        let proto = LargeObjProto::create(
+            self.config.clone(),
+            notify.clone(),
+            recv,
+            msgs,
+            authn,
+            hash
+        )
+        .map_err(|err| ClientSessionDispatchError::Proto { err: err })?;
 
         Ok((local_shutdown, notify, proto))
     }
