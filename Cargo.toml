@@ -78,6 +78,7 @@ constellation-standalone = { git = "https://github.com/constellation-system/cons
 constellation-streams = { git = "https://github.com/constellation-system/constellation-streams.git", branch = "project/ioc", default-features = false }
 log = { version = "0.4", optional = true }
 serde = { version = "1.0", features = ["derive"] }
+uuid = { version = "1.16" }
 
 [dev-dependencies]
 env_logger = { version = "0.10" }
