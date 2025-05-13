@@ -16,6 +16,8 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
@@ -73,8 +75,8 @@ use constellation_component_common::bus::large_obj::dispatch::DispatchLargeObjBu
 use constellation_component_common::bus::large_obj::dispatch::DispatchLargeObjBusCleanup;
 use constellation_component_common::bus::large_obj::dispatch::DispatchLargeObjBusCreateError;
 use constellation_component_common::config::DispatchLargeObjBusConfig;
-use constellation_component_common::xact::XactBatch;
-use constellation_component_common::xact::XactBatchCodec;
+use constellation_component_common::xact::XactBlobBatch;
+use constellation_component_common::xact::XactBatchBlobCodec;
 #[cfg(feature = "standalone")]
 use constellation_standalone::Standalone;
 #[cfg(feature = "standalone")]
@@ -91,17 +93,24 @@ use constellation_streams::stream::StreamID;
 use log::debug;
 use log::error;
 use log::info;
+use uuid::Uuid;
 
 use crate::clients::ClientSessionDispatch;
+use crate::config::ProcessorClassesConfig;
+use crate::config::PeerStateConfig;
 #[cfg(feature = "standalone")]
 use crate::config::StandaloneConfig;
+use crate::state::InstanceEntry;
+use crate::state::PeerState;
+use crate::state::ProcessorIdx;
+use crate::state::ProcessorEntry;
 
 pub type CompoundPeerComponent<
     Wrapper,
     WrapperCodec,
     H,
     IDs,
-    MsgAuth,
+    ClientMsgAuth,
     Epochs,
     Ctx
 > = PeerComponent<
@@ -109,7 +118,7 @@ pub type CompoundPeerComponent<
     WrapperCodec,
     H,
     IDs,
-    MsgAuth,
+    ClientMsgAuth,
     Epochs,
     CompoundFarChannel,
     CompoundFarChannelThreadedFlows<
@@ -143,7 +152,8 @@ pub struct PeerComponent<
     Wrapper: 'static + Clone + Send,
     MsgAuth: 'static
         + Clone
-        + MsgAuthN<XactBatch<H::HashID>, Wrapper, SessionPrin = SessionAuth::Prin>
+        + MsgAuthN<XactBlobBatch<u128, H::HashID, TestSeal>, Wrapper,
+                   SessionPrin = SessionAuth::Prin>
         + Send,
     MsgAuth::SessionPrin: Send + Sync,
     IDs: 'static + Clone + IDGen + Iterator<Item = LargeObjID> + Send,
@@ -209,11 +219,17 @@ pub struct PeerComponent<
     resolver: PhantomData<Resolver>,
     endpoint: PhantomData<Endpoint>,
     client_comm_config: DispatchLargeObjBusConfig<Epochs::Config>,
-    large_obj_config: LargeObjProtoConfig<
-        <XactBatchCodec<H> as Codec<XactBatch<H::HashID>>>::Param,
+    client_large_obj_config: LargeObjProtoConfig<
+        <XactBatchBlobCodec<u128, H, TestSeal, TestSealCodec> as Codec<XactBlobBatch<u128, H::HashID, TestSeal>>>::Param,
         IDs::Config
     >,
-    listener: ThreadedFlowsListener<
+    processor_comm_config: DispatchLargeObjBusConfig<Epochs::Config>,
+    processor_large_obj_config: LargeObjProtoConfig<
+        <XactBatchBlobCodec<u128, H, TestSeal, TestSealCodec> as Codec<XactBlobBatch<u128, H::HashID, TestSeal>>>::Param,
+        IDs::Config
+    >,
+    peer_state_config: PeerStateConfig,
+    client_listener: ThreadedFlowsListener<
         <Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow,
         StreamID<
             <Channel::Xfrm as DatagramXfrm>::PeerAddr,
@@ -222,6 +238,7 @@ pub struct PeerComponent<
         >,
         SessionAuth::Prin
     >,
+    processors: HashMap<Uuid, ProcessorEntry>,
     shutdown: ShutdownFlag,
     ctx: Ctx
 }
@@ -237,6 +254,9 @@ pub enum PeerComponentRunError<Acquire> {
             <LargeObjMsgCodec<SHA3Algo> as Codec<LargeObjMsg<SHA3ID>>>::CreateError,
             Acquire
         >
+    },
+    Start {
+        err: std::io::Error
     }
 }
 
@@ -295,7 +315,8 @@ where
     Wrapper: 'static + Clone + Send,
     MsgAuth: 'static
         + Clone
-        + MsgAuthN<XactBatch<H::HashID>, Wrapper, SessionPrin = SessionAuth::Prin>
+        + MsgAuthN<XactBlobBatch<u128, H::HashID, TestSeal>, Wrapper,
+                   SessionPrin = SessionAuth::Prin>
         + Send,
     MsgAuth::SessionPrin: Send + Sync,
     IDs: 'static + Clone + IDGen + Iterator<Item = LargeObjID> + Send,
@@ -387,8 +408,10 @@ where
     >{
         let PeerComponent {
             client_comm_config,
-            large_obj_config,
-            listener,
+            client_large_obj_config,
+            peer_state_config,
+            client_listener,
+            processors,
             shutdown,
             ctx,
             ..
@@ -397,11 +420,13 @@ where
         info!(target: "peer-component",
               "starting peer component");
 
-        let client_dispatch = ClientSessionDispatch::new(large_obj_config);
+        let state = Arc::new(PeerState::new(peer_state_config, processors));
+        let client_dispatch =
+            ClientSessionDispatch::new(client_large_obj_config, state);
         let client_comm: DispatchLargeObjBus<
-            XactBatch<H::HashID>,
-            XactBatch<H::HashID>,
-            XactBatchCodec<H>,
+            XactBlobBatch<u128, H::HashID, TestSeal>,
+            XactBlobBatch<u128, H::HashID, TestSeal>,
+            XactBatchBlobCodec<u128, H, TestSeal, TestSealCodec>,
             H,
             IDs,
             _,
@@ -419,13 +444,15 @@ where
         > = DispatchLargeObjBus::create(
             client_comm_config,
             client_dispatch,
-            listener,
+            client_listener,
             shutdown.clone(),
             ctx
         )
         .map_err(|err| PeerComponentRunError::ClientComm { err: err })?;
 
-        let client_comm_cleanup = client_comm.start();
+        let client_comm_cleanup = client_comm
+            .start()
+            .map_err(|err| PeerComponentRunError::Start { err: err })?;
 
         Ok(PeerComponentCleanup {
             client_comm_cleanup: client_comm_cleanup,
@@ -480,11 +507,11 @@ impl
 #[cfg(feature = "standalone")]
 impl Standalone
     for CompoundPeerComponent<
-        XactBatch<SHA3ID>,
-        XactBatchCodec<SHA3Algo>,
+        XactBlobBatch<u128, SHA3ID, TestSeal>,
+        XactBatchBlobCodec<u128, SHA3Algo, TestSeal, TestSealCodec>,
         SHA3Algo,
         AscendingCount<LargeObjID>,
-        PassthruMsgAuthN<XactBatch<SHA3ID>, TestCred>,
+        PassthruMsgAuthN<XactBlobBatch<u128, SHA3ID, TestSeal>, TestCred>,
         AscendingCount<u128>,
         StandaloneCtx
     >
@@ -505,9 +532,15 @@ impl Standalone
         config: Self::Config
     ) -> Result<(Self, Self::CreateCleanup), Self::CreateCleanup> {
         let (name_caches_config, peer_config) = config.take();
-        let clients_config = peer_config.take();
-        let (client_registry_config, client_comm_config, large_obj_config) =
+        let (clients_config, processors_config, peer_state_config) =
+            peer_config.take();
+        let (client_registry_config, client_comm_config,
+             client_large_obj_config) =
             clients_config.take();
+        let (processor_registry_config, processor_comm_config,
+             processor_large_obj_config, classes_config,
+             processor_authn_config) =
+            processors_config.take();
         let shutdown = ShutdownFlag::new();
         let (mut caches, caches_join) =
             ThreadedNSNameCaches::create(name_caches_config, shutdown.clone());
@@ -515,13 +548,77 @@ impl Standalone
             shutdown: shutdown.clone(),
             caches_join: caches_join
         };
-        let (listener, reporter) = ThreadedFlowsListener::new();
+        let (client_listener, client_reporter) = ThreadedFlowsListener::new();
         let authn = TrivialAuthN::default();
+
+        // XXX maybe move this part into state?
+        let ProcessorClassesConfig::Static { stat: processor_configs } =
+            classes_config;
+        let mut processor_ids: HashMap<String, ProcessorIdx> =
+            HashMap::with_capacity(processor_configs.len());
+        let mut classes = HashMap::with_capacity(processor_configs.len());
+        let mut curr_id = 0;
+
+        // Build the configuration structure for processors.
+        for processor_config in processor_configs {
+            let (prin, class_configs) = processor_config.take();
+            let id = match processor_ids.get(&prin) {
+                Some(id) => id.clone(),
+                None => {
+                    let idx = ProcessorIdx::from(curr_id);
+
+                    curr_id += 1;
+                    processor_ids.insert(prin, idx.clone());
+
+                    idx
+                }
+            };
+
+            for class_config in class_configs {
+                let (class, instances, versions) = class_config.take();
+                let versions = versions
+                    .into_iter()
+                    .map(|config| config.into());
+                let class: Uuid = class.into();
+                let instance = InstanceEntry::new(id.clone(), versions);
+
+                match classes.entry(class.clone()) {
+                    Entry::Vacant(ent) => {
+                        let ent = ent.insert(HashMap::new());
+
+                        for i in instances {
+                            ent.insert(i as u64, instance.clone());
+                        }
+                    }
+                    Entry::Occupied(mut ent) => {
+                        for i in instances {
+                            if ent.get_mut().insert(i as u64, instance.clone())
+                                .is_some() {
+                                error!(target: "start",
+                                       concat!("duplicate processor: ",
+                                               "class {}, instance {}"),
+                                       class, i);
+
+                                return Err(cleanup)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        processor_ids.shrink_to_fit();
+
+        let processors = classes.into_iter().map(|(class, mut instances)| {
+            instances.shrink_to_fit();
+
+            (class, ProcessorEntry::new(instances))
+        }).collect();
 
         match StandaloneRegistry::create(
             &mut caches,
             authn,
-            reporter,
+            client_reporter,
             client_registry_config
         ) {
             Ok(registry) => {
@@ -537,10 +634,14 @@ impl Standalone
                     ids: PhantomData,
                     resolver: PhantomData,
                     endpoint: PhantomData,
+                    processor_comm_config: processor_comm_config,
+                    processor_large_obj_config: processor_large_obj_config,
+                    peer_state_config: peer_state_config,
                     client_comm_config: client_comm_config,
-                    large_obj_config: large_obj_config,
+                    client_large_obj_config: client_large_obj_config,
                     shutdown: shutdown,
-                    listener: listener,
+                    client_listener: client_listener,
+                    processors: processors,
                     ctx: ctx
                 };
 
@@ -559,11 +660,11 @@ impl Standalone
 
 impl StandaloneService
     for CompoundPeerComponent<
-        XactBatch<SHA3ID>,
-        XactBatchCodec<SHA3Algo>,
+        XactBlobBatch<u128, SHA3ID, TestSeal>,
+        XactBatchBlobCodec<u128, SHA3Algo, TestSeal, TestSealCodec>,
         SHA3Algo,
         AscendingCount<LargeObjID>,
-        PassthruMsgAuthN<XactBatch<SHA3ID>, TestCred>,
+        PassthruMsgAuthN<XactBlobBatch<u128, SHA3ID, TestSeal>, TestCred>,
         AscendingCount<u128>,
         StandaloneCtx
     >
@@ -638,6 +739,7 @@ where
 
 // ISSUE #2: Delete from here
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 
 use constellation_auth::cred::SSLCred;
@@ -646,10 +748,53 @@ use constellation_channels::far::compound::CompoundFarChannelXfrmPeerAddr;
 use constellation_channels::far::compound::CompoundFarIPChannelXfrmPeerAddr;
 use constellation_channels::unix::UnixSocketAddr;
 
+#[derive(Clone, Debug)]
+pub struct TestSeal;
+
+#[derive(Clone)]
+pub struct TestSealCodec;
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum TestCred {
     IP { addr: SocketAddr },
     Unix { addr: UnixSocketAddr }
+}
+
+impl Codec<TestSeal> for TestSealCodec {
+    type CreateError = Infallible;
+    type EncodeError = Infallible;
+    type DecodeError = Infallible;
+    type Param = ();
+
+    #[inline]
+    fn create(_param: ()) -> Result<Self, Infallible> {
+        Ok(TestSealCodec)
+    }
+
+    #[inline]
+    fn buf_size(
+        &self,
+        _val: &TestSeal
+    ) -> usize {
+        0
+    }
+
+    #[inline]
+    fn encode(
+        &mut self,
+        _val: &TestSeal,
+        _buf: &mut [u8]
+    ) -> Result<usize, Self::EncodeError> {
+        Ok(0)
+    }
+
+    #[inline]
+    fn decode(
+        &mut self,
+        _buf: &[u8]
+    ) -> Result<(TestSeal, usize), Self::DecodeError> {
+        Ok((TestSeal, 0))
+    }
 }
 
 impl<Basic> From<SSLCred<CompoundFarChannelSessionCred<Basic>>> for TestCred
