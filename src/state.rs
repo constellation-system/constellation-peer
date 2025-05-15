@@ -32,12 +32,13 @@ use bitvec::vec::BitVec;
 use constellation_common::error::MutexPoison;
 use constellation_common::hashid::HashID;
 use constellation_common::retry::Retry;
+use constellation_common::sync::Notify;
 use constellation_common::version::Version;
 use constellation_common::version::VersionRange;
 use constellation_component_common::consensus_ctl::ConsensusCtlSubmit;
 use constellation_component_common::xact::XactCommittedEffects;
-use constellation_component_common::xact::XactCommittedRound;
 use constellation_component_common::xact::XactCommittedReq;
+use constellation_component_common::xact::XactCommittedRound;
 use constellation_component_common::xact::XactConsensusSeal;
 use constellation_component_common::xact::XactEffects;
 use constellation_component_common::xact::XactError;
@@ -62,20 +63,17 @@ enum PendingXactStage {
     /// Pre-commit phase.
     PreCommit {
         // XXX this will need retry information for sending to processors.
-
         /// Whether or not the transaction has been dispatched to a
         /// processor.
-        dispatched: bool,
+        dispatched: bool
     },
     /// Submitted to consensus.
-    Commit {
-        submitted: bool,
-    },
+    Commit { submitted: bool },
     /// Post-commit, submitted for processing.
     Process {
         dispatched: bool,
         /// Linearization point of the transaction.
-        lin_point: XactLinPoint<u128>,
+        lin_point: XactLinPoint<u128>
     }
 }
 
@@ -97,7 +95,7 @@ struct PeerReport {
     nretries: usize
 }
 
-enum PeerXactState {
+enum PeerXactState<Seal> {
     /// Submitted to a processor pre-commit.
     Pending {
         /// Processor to use.
@@ -114,6 +112,8 @@ enum PeerXactState {
         effects: XactEffects<u128, Vec<u8>>,
         /// Transaction payload.
         payload: Vec<u8>,
+        /// Authorization seal.
+        seal: Seal
     },
     /// Request is complete.
     Complete {
@@ -133,13 +133,14 @@ enum PeerXactState {
     }
 }
 
-struct PeerXact<Prin>
+struct PeerXact<Prin, Seal>
 where
-    Prin: Clone + Display + Eq + Hash + Send + Sync {
+    Prin: Clone + Display + Eq + Hash + Send + Sync,
+    Seal: Clone {
     /// Reporting information.
     reporting: HashMap<Prin, PeerReport>,
     /// State of the transaction.
-    state: PeerXactState,
+    state: PeerXactState<Seal>
 }
 
 #[derive(Clone)]
@@ -147,7 +148,7 @@ pub struct InstanceEntry {
     /// Local processor ID.
     processor: ProcessorIdx,
     /// Supported versions.
-    versions: Vec<VersionRange>,
+    versions: Vec<VersionRange>
 }
 
 pub struct ProcessorEntry {
@@ -177,9 +178,10 @@ where
 pub(crate) struct PeerState<H, Prin, Seal>
 where
     Prin: Clone + Display + Eq + Hash + Send + Sync,
-    H: Clone + Display + Eq + Hash + HashID {
+    H: Clone + Display + Eq + Hash + HashID,
+    Seal: Clone {
     /// Current state of transactions.
-    xacts: Mutex<HashMap<H, PeerXact<Prin>>>,
+    xacts: Mutex<HashMap<H, PeerXact<Prin, Seal>>>,
     /// Map from service information to local processor IDs.
     processors: HashMap<Uuid, ProcessorEntry>,
     /// Period at which tombstones should be expired.
@@ -189,7 +191,9 @@ where
     /// Record of missing transactions in rounds.
     missing: Mutex<HashMap<H, u128>>,
     /// Retry configuration.
-    retry: Retry
+    retry: Retry,
+    /// Notification for changes.
+    notify: Notify
 }
 
 /// Actions to be done for [get_client_msg](PeerXact::get_client_msg).
@@ -216,21 +220,20 @@ impl InstanceEntry {
     #[inline]
     pub fn new<I>(
         processor: ProcessorIdx,
-        versions: I,
+        versions: I
     ) -> Self
-    where I: Iterator<Item = VersionRange> {
+    where
+        I: Iterator<Item = VersionRange> {
         InstanceEntry {
             processor: processor,
-            versions: versions.collect(),
+            versions: versions.collect()
         }
     }
 }
 
 impl ProcessorEntry {
     #[inline]
-    pub fn new(
-        instances: HashMap<u64, InstanceEntry>
-    ) -> Self {
+    pub fn new(instances: HashMap<u64, InstanceEntry>) -> Self {
         ProcessorEntry {
             instances: instances
         }
@@ -251,9 +254,11 @@ impl From<ProcessorIdx> for usize {
     }
 }
 
-impl<Prin> PeerXact<Prin>
+impl<Prin, Seal> PeerXact<Prin, Seal>
 where
-    Prin: Clone + Display + Eq + Hash + Send + Sync {
+    Prin: Clone + Display + Eq + Hash + Send + Sync,
+    Seal: Clone
+{
     /// Reset the reporting times.
     fn reset_reporting(&mut self) {
         let now = Instant::now();
@@ -282,50 +287,82 @@ where
 
         let (state, delete) = match &self.state {
             PeerXactState::Pending { stage, effects, .. } => match stage {
-                PendingXactStage::PreCommit { dispatched: false, .. } =>
-                    (XactNotifyState::Accept, false),
                 PendingXactStage::PreCommit {
-                    dispatched: true,
-                    ..
+                    dispatched: false, ..
+                } => (XactNotifyState::Accept, false),
+                PendingXactStage::PreCommit {
+                    dispatched: true, ..
                 } => match effects {
-                    XactEffects::HardNone { when } =>
-                        (XactNotifyState::PrecommitDispatch {
-                            when: when.clone(),
-                        }, false),
-                    _ => (XactNotifyState::PrecommitDispatch {
-                        when: None,
-                    }, false)
+                    XactEffects::HardNone { when } => (
+                        XactNotifyState::PrecommitDispatch {
+                            when: when.clone()
+                        },
+                        false
+                    ),
+                    _ => (
+                        XactNotifyState::PrecommitDispatch { when: None },
+                        false
+                    )
+                },
+                PendingXactStage::Commit { submitted: false } => {
+                    (XactNotifyState::Accept, false)
                 }
-                PendingXactStage::Commit { submitted: false }  =>
-                    (XactNotifyState::Accept, false),
-                PendingXactStage::Commit { submitted: true }  =>
-                    (XactNotifyState::Consensus, false),
-                PendingXactStage::Process { dispatched: false, lin_point } =>
-                    (XactNotifyState::Commit { when: lin_point.clone() },
-                     false),
-                PendingXactStage::Process { dispatched: true, lin_point } =>
-                    (XactNotifyState::Dispatch { when: lin_point.clone() },
-                     false),
-            }
-            PeerXactState::Complete { expire, lin_point, res } => if full {
-                (XactNotifyState::Success {
-                    result: Some(res.clone()),
-                    when: lin_point.clone()
-                }, *expire <= now)
-            } else {
-                (XactNotifyState::Success {
-                    when: lin_point.clone(),
-                    result: None,
-                }, *expire <= now)
+                PendingXactStage::Commit { submitted: true } => {
+                    (XactNotifyState::Consensus, false)
+                }
+                PendingXactStage::Process {
+                    dispatched: false,
+                    lin_point
+                } => (
+                    XactNotifyState::Commit {
+                        when: lin_point.clone()
+                    },
+                    false
+                ),
+                PendingXactStage::Process {
+                    dispatched: true,
+                    lin_point
+                } => (
+                    XactNotifyState::Dispatch {
+                        when: lin_point.clone()
+                    },
+                    false
+                )
             },
-            PeerXactState::Error { expire, error } => if full {
-                (XactNotifyState::Error {
-                    error: Some(error.clone()),
-                }, *expire <= now)
-            } else {
-                (XactNotifyState::Error {
-                    error: None,
-                }, *expire <= now)
+            PeerXactState::Complete {
+                expire,
+                lin_point,
+                res
+            } => {
+                if full {
+                    (
+                        XactNotifyState::Success {
+                            result: Some(res.clone()),
+                            when: lin_point.clone()
+                        },
+                        *expire <= now
+                    )
+                } else {
+                    (
+                        XactNotifyState::Success {
+                            when: lin_point.clone(),
+                            result: None
+                        },
+                        *expire <= now
+                    )
+                }
+            }
+            PeerXactState::Error { expire, error } => {
+                if full {
+                    (
+                        XactNotifyState::Error {
+                            error: Some(error.clone())
+                        },
+                        *expire <= now
+                    )
+                } else {
+                    (XactNotifyState::Error { error: None }, *expire <= now)
+                }
             }
         };
 
@@ -355,10 +392,12 @@ where
                 let next = report.when;
                 let expire = if when <= now {
                     match report.kind {
-                        PeerReportKind::Result => self
-                            .get_notify_msg(hash, now, true, notifies),
-                        PeerReportKind::Notify => self
-                            .get_notify_msg(hash, now, false, notifies),
+                        PeerReportKind::Result => {
+                            self.get_notify_msg(hash, now, true, notifies)
+                        }
+                        PeerReportKind::Notify => {
+                            self.get_notify_msg(hash, now, false, notifies)
+                        }
                     }
                 } else {
                     false
@@ -381,13 +420,14 @@ where
             (DeleteAction::Unsubscribe, None)
         }
     }
-
 }
 
 impl<H, Prin, Seal> PeerState<H, Prin, Seal>
 where
     Prin: Clone + Display + Eq + Hash + Send + Sync,
-    H: Clone + Display + Eq + Hash + HashID {
+    H: Clone + Display + Eq + Hash + HashID,
+    Seal: Clone
+{
     #[inline]
     pub(crate) fn new(
         config: PeerStateConfig,
@@ -396,8 +436,9 @@ where
         let (tombstone_duration, xacts_size_hint, seals_size_hint, retry) =
             config.take();
         let (xacts, missing) = match xacts_size_hint {
-            Some(size) => (HashMap::with_capacity(size),
-                           HashMap::with_capacity(size)),
+            Some(size) => {
+                (HashMap::with_capacity(size), HashMap::with_capacity(size))
+            }
             None => (HashMap::new(), HashMap::new())
         };
         let seals = match seals_size_hint {
@@ -408,23 +449,28 @@ where
         let missing = Mutex::new(missing);
         let xacts = Mutex::new(xacts);
         let seals = Mutex::new(seals);
+        let notify = Notify::new();
 
         PeerState {
             tombstone_duration: tombstone_duration,
             processors: processors,
             missing: missing,
+            notify: notify,
             seals: seals,
             xacts: xacts,
             retry: retry
         }
     }
 
+    #[inline]
+    pub(crate) fn notify(&self) -> Notify {
+        self.notify.clone()
+    }
+
     pub(crate) fn get_consensus_msgs(
-        &self,
-    ) -> Result<
-        (Vec<ConsensusCtlSubmit<H>>, Option<Instant>),
-        MutexPoison
-    > {
+        &self
+    ) -> Result<(Vec<ConsensusCtlSubmit<H>>, Option<Instant>), MutexPoison>
+    {
         trace!(target: "peer-state",
                "checking for commit-stage transactions");
 
@@ -460,9 +506,16 @@ where
         &self,
         target: ProcessorIdx
     ) -> Result<
-        (Vec<XactCommittedRound<u128, H, Seal, Vec<u8>, Vec<u8>>>,
-         Vec<XactSealed<(), XactUncommittedHashReq<u128, H, Vec<u8>, Vec<u8>>>>,
-         Option<Instant>),
+        (
+            Vec<XactCommittedRound<u128, H, Seal, Vec<u8>, Vec<u8>>>,
+            Vec<
+                XactSealed<
+                    Seal,
+                    XactUncommittedHashReq<u128, H, Vec<u8>, Vec<u8>>
+                >
+            >,
+            Option<Instant>
+        ),
         MutexPoison
     > {
         // Scan pre-commit requests.
@@ -483,6 +536,7 @@ where
                     instance,
                     effects,
                     payload,
+                    seal,
                     ..
                 } if processor == &target => {
                     // XXX do retry information here.
@@ -500,7 +554,7 @@ where
                         effects.clone()
                     );
 
-                    reqs.push(XactSealed::new((), req));
+                    reqs.push(XactSealed::new(seal.clone(), req));
                     *dispatched = true
                 }
                 _ => {
@@ -535,10 +589,10 @@ where
                             match &mut xact.state {
                                 // This is what we expect
                                 PeerXactState::Pending {
-                                    stage: PendingXactStage::Process {
-                                        dispatched,
-                                        ..
-                                    },
+                                    stage:
+                                        PendingXactStage::Process {
+                                            dispatched, ..
+                                        },
                                     processor,
                                     class,
                                     version,
@@ -546,46 +600,52 @@ where
                                     payload,
                                     effects,
                                     ..
-                                } => if processor == &target {
-                                    trace!(target: "peer-state",
+                                } => {
+                                    if processor == &target {
+                                        trace!(target: "peer-state",
                                            "adding transaction {}",
                                            hash);
-                                    let effects = match effects {
-                                        XactEffects::Effects {
-                                            effects,
-                                            hard
-                                        } => Some(XactCommittedEffects::new(
-                                            *hard,
-                                            effects.clone()
-                                        )),
-                                        XactEffects::SoftNone => None,
-                                        // This shouldn't happen, but
-                                        // it's not fatal.
-                                        XactEffects::HardNone { .. } => {
-                                            error!(target: "peer-state",
+                                        let effects = match effects {
+                                            XactEffects::Effects {
+                                                effects,
+                                                hard
+                                            } => {
+                                                Some(XactCommittedEffects::new(
+                                                    *hard,
+                                                    effects.clone()
+                                                ))
+                                            }
+                                            XactEffects::SoftNone => None,
+                                            // This shouldn't happen, but
+                                            // it's not fatal.
+                                            XactEffects::HardNone {
+                                                ..
+                                            } => {
+                                                error!(target: "peer-state",
                                                    concat!("transaction {} ",
                                                            "in process stage ",
                                                            "is hard no-effect"),
                                                    hash);
-                                            None
-                                        }
-                                    };
+                                                None
+                                            }
+                                        };
 
-                                    reqs.push(XactCommittedReq::new(
-                                        class.clone(),
-                                        version.clone(),
-                                        *instance,
-                                        i,
-                                        payload.clone(),
-                                        effects
-                                    ));
+                                        reqs.push(XactCommittedReq::new(
+                                            class.clone(),
+                                            version.clone(),
+                                            *instance,
+                                            i,
+                                            payload.clone(),
+                                            effects
+                                        ));
 
-                                    *dispatched = true;
-                                } else {
-                                    trace!(target: "peer-state",
+                                        *dispatched = true;
+                                    } else {
+                                        trace!(target: "peer-state",
                                            concat!("skipping transaction {} ",
                                                    "targeted at {}"),
                                            hash, processor);
+                                    }
                                 }
                                 // Transaction is in the wrong stage.
                                 PeerXactState::Pending { .. } => {
@@ -593,7 +653,7 @@ where
                                            concat!("transaction {} isn't in ",
                                                    "process stage"),
                                            hash);
-                                },
+                                }
                                 // Transaction is in the wrong state.
                                 _ => {
                                     error!(target: "peer-state",
@@ -602,7 +662,6 @@ where
                                            hash);
                                 }
                             }
-
                         } else {
                             // This shouldn't happen.
                             error!(target: "peer-state",
@@ -615,11 +674,7 @@ where
                            "submitting round {} to {}",
                            round, target);
 
-                    rounds.push(XactCommittedRound::new(
-                        *round,
-                        None,
-                        reqs
-                    ));
+                    rounds.push(XactCommittedRound::new(*round, None, reqs));
                 } else {
                     // There are transactions left, but we don't have them yet.
 
@@ -637,10 +692,11 @@ where
     pub(crate) fn get_client_msgs(
         &self,
         hashes: &mut HashSet<H>,
-        client: &Prin,
-    ) -> Result<(Vec<XactNotify<u128, H, Vec<u8>, Vec<u8>>>,
-                 Option<Instant>),
-                MutexPoison> {
+        client: &Prin
+    ) -> Result<
+        (Vec<XactNotify<u128, H, Vec<u8>, Vec<u8>>>, Option<Instant>),
+        MutexPoison
+    > {
         let mut notifies = Vec::with_capacity(hashes.len());
         // XXX it's fairly inefficient to generate these vectors.
         let mut deletes = Vec::with_capacity(hashes.len());
@@ -657,14 +713,15 @@ where
                    "checking for transaction {}",
                    hash);
 
-            if let Some(xact) = self.xacts.lock().map_err(|_| MutexPoison)?
-                .get_mut(hash) {
+            if let Some(xact) =
+                self.xacts.lock().map_err(|_| MutexPoison)?.get_mut(hash)
+            {
                 trace!(target: "peer-state",
                        "generating message for transaction {}",
                        hash);
 
-                let (action, next) = xact
-                    .get_client_msg(hash, now, client, &mut notifies);
+                let (action, next) =
+                    xact.get_client_msg(hash, now, client, &mut notifies);
 
                 match action {
                     DeleteAction::Unsubscribe => {
@@ -680,7 +737,7 @@ where
                                hash);
 
                         deletes.push((hash.clone(), true))
-                    },
+                    }
                     _ => {}
                 }
 
@@ -724,21 +781,42 @@ where
         &self,
         class: &Uuid,
         version: &Version,
-        instance: u64,
+        instance: u64
     ) -> Result<ProcessorIdx, XactError<Vec<u8>>> {
+        trace!(target: "peer-state",
+               "looking up processor for class {}, version {}, instance {}",
+               class, version, instance);
+
         match self.processors.get(class) {
             Some(ent) => match ent.instances.get(&instance) {
-                Some(ent) => if ent.versions.iter()
-                    .any(|range| range.contains(version)) {
-                    Ok(ent.processor.clone())
-                } else {
-                    Err(XactError::UnknownVersion)
-                },
-                None => {
-                    return Err(XactError::UnknownInstance)
+                Some(ent) => {
+                    if ent.versions.iter().any(|range| range.contains(version))
+                    {
+                        trace!(target: "peer-state",
+                           "found {}",
+                           ent.processor);
+
+                        Ok(ent.processor.clone())
+                    } else {
+                        trace!(target: "peer-state",
+                           "acceptable version not found");
+
+                        Err(XactError::UnknownVersion)
+                    }
                 }
+                None => {
+                    trace!(target: "peer-state",
+                           "instance not found");
+
+                    Err(XactError::UnknownInstance)
+                }
+            },
+            None => {
+                trace!(target: "peer-state",
+                       "class not found");
+
+                Err(XactError::UnknownClass)
             }
-            None => Err(XactError::UnknownClass)
         }
     }
 
@@ -750,7 +828,8 @@ where
         instance: u64,
         hash: H,
         effects: XactEffects<u128, Vec<u8>>,
-        payload: Vec<u8>
+        payload: Vec<u8>,
+        seal: Seal
     ) -> Result<(), MutexPoison> {
         let report = PeerReport {
             kind: PeerReportKind::Result,
@@ -758,119 +837,170 @@ where
             nretries: 0
         };
 
+        debug!(target: "peer-state",
+               concat!("adding transaction from {}: ",
+                       "{}, class: {}, version: {}, instance: {}"),
+               client, hash, class, version, instance);
+
         // Try looking up the processor.
         match self.get_processor(&class, &version, instance) {
-            Ok(idx) => match self.xacts.lock().map_err(|_| MutexPoison)?
-                .entry(hash.clone()) {
+            Ok(idx) => match self
+                .xacts
+                .lock()
+                .map_err(|_| MutexPoison)?
+                .entry(hash.clone())
+            {
                 Entry::Occupied(mut ent) => {
+                    trace!(target: "peer-state",
+                           "transaction {} already exists",
+                           hash);
+
                     // The entry already exists; subscribe this client to it.
                     ent.get_mut().reporting.insert(client.clone(), report);
+                    self.notify.notify().map_err(|_| MutexPoison)?;
                 }
-                Entry::Vacant(ent) => if let Some(round) = self
-                    .missing
-                    .lock()
-                    .map_err(|_| MutexPoison)?
-                    .remove(&hash) {
-                    // The transaction is already in a committed round.
+                // Check if the transaction in a known missing transaction.
+                Entry::Vacant(ent) => {
+                    if let Some(round) = self
+                        .missing
+                        .lock()
+                        .map_err(|_| MutexPoison)?
+                        .remove(&hash)
+                    {
+                        // The transaction is already in a committed round.
 
-                    trace!(target: "peer-state",
+                        trace!(target: "peer-state",
                            "transaction {} is in missing set",
                            hash);
 
-                    // Try looking up the round of the missing entry.
-                    if let Some(seal_ent) = self.seals.lock()
-                        .map_err(|_| MutexPoison)?
-                        .get_mut(&round) {
-                        // Now find the hash's index within the seal.
-                        if let Some(idx) = seal_ent
-                            .seal
-                            .hashes()
-                            .iter()
-                            .position(|actual| &hash == actual) {
-                            // Add the entry and set the known flag.
-                            let stage = PendingXactStage::Process {
-                                lin_point: XactLinPoint::new(round, idx),
-                                dispatched: false
-                            };
-                            let state = PeerXactState::Pending {
-                                processor: ProcessorIdx::from(idx),
-                                stage: stage,
-                                class: class,
-                                version: version,
-                                instance: instance,
-                                effects: effects,
-                                payload: payload
-                            };
-                            let mut reporting = HashMap::new();
+                        // Try looking up the round of the missing entry.
+                        if let Some(seal_ent) = self
+                            .seals
+                            .lock()
+                            .map_err(|_| MutexPoison)?
+                            .get_mut(&round)
+                        {
+                            // Now find the hash's index within the seal.
+                            if let Some(idx) = seal_ent
+                                .seal
+                                .hashes()
+                                .iter()
+                                .position(|actual| &hash == actual)
+                            {
+                                // Add the entry and set the known flag.
+                                let stage = PendingXactStage::Process {
+                                    lin_point: XactLinPoint::new(round, idx),
+                                    dispatched: false
+                                };
+                                let state = PeerXactState::Pending {
+                                    processor: ProcessorIdx::from(idx),
+                                    stage: stage,
+                                    class: class,
+                                    version: version,
+                                    instance: instance,
+                                    effects: effects,
+                                    payload: payload,
+                                    seal: seal
+                                };
+                                let mut reporting = HashMap::new();
 
-                            debug!(target: "peer-state",
+                                debug!(target: "peer-state",
                                    "creating transaction {} in process stage",
                                    hash);
 
-                            reporting.insert(client.clone(), report);
-                            ent.insert(PeerXact {
-                                reporting: reporting,
-                                state: state
-                            });
+                                reporting.insert(client.clone(), report);
+                                ent.insert(PeerXact {
+                                    reporting: reporting,
+                                    state: state
+                                });
 
-                            debug!(target: "peer-state",
+                                debug!(target: "peer-state",
                                    "setting missing transaction {} to known",
                                    hash);
 
-                            seal_ent.known.set(idx, true);
+                                seal_ent.known.set(idx, true);
+                                self.notify
+                                    .notify()
+                                    .map_err(|_| MutexPoison)?;
+                            } else {
+                                // This should never happen.
+                                error!(target: "peer-state",
+                                   "transaction {} is in not in round {}",
+                                   hash, round);
+                            }
                         } else {
                             // This should never happen.
                             error!(target: "peer-state",
-                                   "transaction {} is in not in round {}",
-                                   hash, round);
-                        }
-                    } else {
-                        // This should never happen.
-                        error!(target: "peer-state",
                                "seal for round {} not found",
                                round);
-                    }
-                } else {
-                    // The round is unknown to us.
-                    let stage = match &effects {
-                        // If there are effects, we go straight to
-                        // consensus.
-                        XactEffects::Effects { .. } =>
-                            PendingXactStage::Commit {
-                                submitted: false
-                            },
-                        // Otherwise, we try to process the transaction
-                        // without a commit.
-                        XactEffects::HardNone { .. } |
-                        XactEffects::SoftNone =>
-                            PendingXactStage::PreCommit {
-                                dispatched: false
-                            }
-                    };
-                    let state = PeerXactState::Pending {
-                        processor: idx,
-                        stage: stage,
-                        class: class,
-                        version: version,
-                        instance: instance,
-                        effects: effects,
-                        payload: payload
-                    };
-                    let mut reporting = HashMap::new();
+                        }
+                    } else {
+                        trace!(target: "peer-state",
+                           "transaction {} is completely new",
+                           hash);
 
-                    reporting.insert(client.clone(), report);
-                    ent.insert(PeerXact {
-                        reporting: reporting,
-                        state: state
-                    });
+                        let stage = match &effects {
+                            // If there are effects, we go straight to
+                            // consensus.
+                            XactEffects::Effects { .. } => {
+                                trace!(target: "peer-state",
+                                   "transaction {} needs a consensus round",
+                                   hash);
+
+                                PendingXactStage::Commit { submitted: false }
+                            }
+                            // Otherwise, we try to process the transaction
+                            // without a commit.
+                            XactEffects::HardNone { .. } |
+                            XactEffects::SoftNone => {
+                                trace!(target: "peer-state",
+                                   concat!("attempting transaction {} without ",
+                                           "a consensus round"),
+                                   hash);
+
+                                PendingXactStage::PreCommit {
+                                    dispatched: false
+                                }
+                            }
+                        };
+                        let state = PeerXactState::Pending {
+                            processor: idx,
+                            stage: stage,
+                            class: class,
+                            version: version,
+                            instance: instance,
+                            effects: effects,
+                            payload: payload,
+                            seal: seal
+                        };
+                        let mut reporting = HashMap::new();
+
+                        trace!(target: "peer-state",
+                           "adding {} to reporting for transaction {}",
+                           client, hash);
+
+                        reporting.insert(client.clone(), report);
+                        ent.insert(PeerXact {
+                            reporting: reporting,
+                            state: state
+                        });
+                        self.notify.notify().map_err(|_| MutexPoison)?;
+                    }
                 }
-            }
-            Err(err) => match self.xacts.lock().map_err(|_| MutexPoison)?
-                .entry(hash.clone()) {
+            },
+            Err(err) => match self
+                .xacts
+                .lock()
+                .map_err(|_| MutexPoison)?
+                .entry(hash.clone())
+            {
                 // Only this case should ever happen.
                 Entry::Vacant(ent) => {
-                    let expire = Instant::now() +
-                        self.tombstone_duration;
+                    trace!(target: "peer-state",
+                           "adding error state for transaction {}",
+                           hash);
+
+                    let expire = Instant::now() + self.tombstone_duration;
                     let state = PeerXactState::Error {
                         expire: expire,
                         error: err
@@ -880,8 +1010,9 @@ where
                     reporting.insert(client.clone(), report);
                     ent.insert(PeerXact {
                         reporting: reporting,
-                    state: state
+                        state: state
                     });
+                    self.notify.notify().map_err(|_| MutexPoison)?;
                 }
                 // Something is very, very wrong if we get here.
                 Entry::Occupied(_) => {
@@ -903,8 +1034,9 @@ where
         lin_point: XactLinPoint<u128>,
         res: Vec<u8>
     ) -> Result<(), MutexPoison> {
-        if let Some(xact) = self.xacts.lock().map_err(|_| MutexPoison)?
-            .get_mut(&hash) {
+        if let Some(xact) =
+            self.xacts.lock().map_err(|_| MutexPoison)?.get_mut(&hash)
+        {
             // Consistency check with state.
             let check = match &xact.state {
                 // This shouldn't happen, as it shouldn't have been
@@ -923,10 +1055,10 @@ where
                 // This shouldn't happen, as it shouldn't have been
                 // sent to the processor.
                 PeerXactState::Pending {
-                    stage: PendingXactStage::PreCommit {
-                        dispatched: false,
-                        ..
-                    },
+                    stage:
+                        PendingXactStage::PreCommit {
+                            dispatched: false, ..
+                        },
                     ..
                 } => {
                     warn!(target: "peer-state",
@@ -939,7 +1071,10 @@ where
                 // This shouldn't happen, as it shouldn't have been
                 // sent to the processor.
                 PeerXactState::Pending {
-                    stage: PendingXactStage::Process { dispatched: false, .. },
+                    stage:
+                        PendingXactStage::Process {
+                            dispatched: false, ..
+                        },
                     ..
                 } => {
                     warn!(target: "peer-state",
@@ -953,7 +1088,10 @@ where
                 // allow the transaction to be reported.
                 PeerXactState::Pending {
                     stage: PendingXactStage::PreCommit { .. },
-                    effects: XactEffects::HardNone { when: Some(requested) },
+                    effects:
+                        XactEffects::HardNone {
+                            when: Some(requested)
+                        },
                     ..
                 } if requested != &lin_point => {
                     warn!(target: "peer-state",
@@ -964,10 +1102,11 @@ where
                     ResultState::Error
                 }
                 PeerXactState::Pending {
-                    stage: PendingXactStage::Process {
-                        lin_point: requested,
-                        ..
-                    },
+                    stage:
+                        PendingXactStage::Process {
+                            lin_point: requested,
+                            ..
+                        },
                     ..
                 } if requested != &lin_point => {
                     warn!(target: "peer-state",
@@ -984,7 +1123,7 @@ where
                           hash);
 
                     ResultState::Error
-                },
+                }
                 // This indicates inconsistency with the processor,
                 // but there is noting we can do, as we're already in
                 // the complete state.
@@ -1024,7 +1163,8 @@ where
                         lin_point: lin_point,
                         expire: expire,
                         res: res
-                    }
+                    };
+                    self.notify.notify().map_err(|_| MutexPoison)?;
                 }
                 ResultState::Error => {
                     debug!(target: "peer-state",
@@ -1038,7 +1178,8 @@ where
                     xact.state = PeerXactState::Error {
                         error: XactError::Internal,
                         expire: expire
-                    }
+                    };
+                    self.notify.notify().map_err(|_| MutexPoison)?;
                 }
                 ResultState::Ignore => {}
             }
@@ -1051,13 +1192,14 @@ where
         Ok(())
     }
 
-    pub(crate) fn add_error (
+    pub(crate) fn add_error(
         &self,
         hash: H,
-        error: XactError<Vec<u8>>,
+        error: XactError<Vec<u8>>
     ) -> Result<(), MutexPoison> {
-        if let Some(xact) = self.xacts.lock().map_err(|_| MutexPoison)?
-            .get_mut(&hash) {
+        if let Some(xact) =
+            self.xacts.lock().map_err(|_| MutexPoison)?.get_mut(&hash)
+        {
             // Consistency check with state.
             let check = match &xact.state {
                 // This shouldn't happen, as it shouldn't have been
@@ -1076,10 +1218,10 @@ where
                 // This shouldn't happen, as it shouldn't have been
                 // sent to the processor.
                 PeerXactState::Pending {
-                    stage: PendingXactStage::PreCommit {
-                        dispatched: false,
-                        ..
-                    },
+                    stage:
+                        PendingXactStage::PreCommit {
+                            dispatched: false, ..
+                        },
                     ..
                 } => {
                     warn!(target: "peer-state",
@@ -1092,7 +1234,10 @@ where
                 // This shouldn't happen, as it shouldn't have been
                 // sent to the processor.
                 PeerXactState::Pending {
-                    stage: PendingXactStage::Process { dispatched: false, .. },
+                    stage:
+                        PendingXactStage::Process {
+                            dispatched: false, ..
+                        },
                     ..
                 } => {
                     warn!(target: "peer-state",
@@ -1113,16 +1258,15 @@ where
                 // This indicates inconsistency with the processor,
                 // but there is nothing we can do, because it's
                 // already in the error state.
-                PeerXactState::Error {
-                    error: actual,
-                    ..
-                } if actual != &error => {
+                PeerXactState::Error { error: actual, .. }
+                    if actual != &error =>
+                {
                     warn!(target: "peer-state",
                            "inconsistent error for transaction {}",
                            hash);
 
                     ResultState::Ignore
-                },
+                }
                 // This is ok and can happen from a delayed message.
                 PeerXactState::Error { .. } => {
                     debug!(target: "peer-state",
@@ -1130,7 +1274,7 @@ where
                            hash);
 
                     ResultState::Ignore
-                },
+                }
                 _ => ResultState::Ok
             };
 
@@ -1147,7 +1291,8 @@ where
                     xact.state = PeerXactState::Error {
                         expire: expire,
                         error: error
-                    }
+                    };
+                    self.notify.notify().map_err(|_| MutexPoison)?;
                 }
                 ResultState::Error => {
                     debug!(target: "peer-state",
@@ -1161,7 +1306,8 @@ where
                     xact.state = PeerXactState::Error {
                         error: XactError::Internal,
                         expire: expire
-                    }
+                    };
+                    self.notify.notify().map_err(|_| MutexPoison)?;
                 }
                 ResultState::Ignore => {}
             }
@@ -1194,17 +1340,23 @@ where
                 // See if we know about the transaction.
                 if let Some(ent) = xacts.get_mut(hash) {
                     // Make sure it's in the right stage.
-                    if let PeerXactState::Pending { processor, stage, ..} =
-                        &mut ent.state {
+                    if let PeerXactState::Pending {
+                        processor, stage, ..
+                    } = &mut ent.state
+                    {
                         if let Entry::Vacant(ent) =
-                            retries.entry(processor.clone()) {
+                            retries.entry(processor.clone())
+                        {
                             ent.insert(ConsensusSealRetry {
                                 nretries: 0,
                                 when: now
                             });
                         }
 
-                        if !matches!(stage, PendingXactStage::Commit { submitted: true }) {
+                        if !matches!(
+                            stage,
+                            PendingXactStage::Commit { submitted: true }
+                        ) {
                             error!(target: "peer-state",
                                    concat!("consensus seal references ",
                                            "transaction {} in wrong stage"),
@@ -1247,6 +1399,7 @@ where
                 known: known,
                 seal: seal
             });
+            self.notify.notify().map_err(|_| MutexPoison)?;
         } else {
             debug!(target: "peer-state",
                    "consensus seal for round {} already processed",

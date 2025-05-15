@@ -51,7 +51,8 @@ where
     /// Configuration for incoming client connections.
     clients: ClientsConfig<Channel, Flows, Epochs, LargeObj, Xfrm>,
     /// Configuration for processors.
-    processors: ProcessorsConfig<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>,
+    processors:
+        ProcessorsConfig<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>,
     /// Configuration for the peer state.
     #[serde(default)]
     #[serde(flatten)]
@@ -82,16 +83,12 @@ pub enum ClassIDConfig {
     /// A UUID identifying the service.
     ///
     /// This is the method used to transmit on the wire.
-    UUID {
-        uuid: Uuid
-    },
+    UUID { uuid: Uuid },
     /// A string name identifying the service.
     ///
     /// This will be used to produce a v5 UUID for transmission on the
     /// wire.
-    Name {
-        name: String
-    }
+    Name { name: String }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -222,7 +219,7 @@ impl PeerStateConfig {
             tombstone_duration: tombstone_duration,
             transactions_size_hint: transactions_size_hint,
             seals_size_hint: seals_size_hint,
-            retry: retry,
+            retry: retry
         }
     }
 
@@ -243,8 +240,12 @@ impl PeerStateConfig {
 
     #[inline]
     pub fn take(self) -> (Duration, Option<usize>, Option<usize>, Retry) {
-        (self.tombstone_duration, self.transactions_size_hint,
-         self.seals_size_hint, self.retry)
+        (
+            self.tombstone_duration,
+            self.transactions_size_hint,
+            self.seals_size_hint,
+            self.retry
+        )
     }
 }
 
@@ -253,8 +254,9 @@ impl From<ClassIDConfig> for Uuid {
     fn from(val: ClassIDConfig) -> Uuid {
         match val {
             ClassIDConfig::UUID { uuid } => uuid,
-            ClassIDConfig::Name { name } =>
+            ClassIDConfig::Name { name } => {
                 Uuid::new_v5(&Uuid::NAMESPACE_DNS, name.as_bytes())
+            }
         }
     }
 }
@@ -265,10 +267,11 @@ impl ClassConfig {
         instances: I,
         versions: J
     ) -> Self
-    where I: Iterator<Item = usize>,
-          J: Iterator<Item = VersionRange> {
-        let versions = versions.map(|val| VersionRangeConfig::from(val))
-            .collect();
+    where
+        I: Iterator<Item = usize>,
+        J: Iterator<Item = VersionRange> {
+        let versions =
+            versions.map(|val| VersionRangeConfig::from(val)).collect();
         let instances = instances.collect();
 
         ClassConfig {
@@ -341,8 +344,16 @@ where
     #[inline]
     pub fn new(
         clients: ClientsConfig<Channel, Flows, Epochs, LargeObj, Xfrm>,
-        processors: ProcessorsConfig<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>,
-    state: PeerStateConfig
+        processors: ProcessorsConfig<
+            Prin,
+            Channel,
+            Flows,
+            Epochs,
+            LargeObj,
+            AuthN,
+            Xfrm
+        >,
+        state: PeerStateConfig
     ) -> Self {
         PeerConfig {
             processors: processors,
@@ -361,23 +372,24 @@ where
     #[inline]
     pub fn processors(
         &self
-    ) -> &ProcessorsConfig<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm> {
+    ) -> &ProcessorsConfig<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>
+    {
         &self.processors
     }
 
     #[inline]
-    pub fn state(
-        &self
-    ) -> &PeerStateConfig {
+    pub fn state(&self) -> &PeerStateConfig {
         &self.state
     }
 
     #[inline]
     pub fn take(
         self
-    ) -> (ClientsConfig<Channel, Flows, Epochs, LargeObj, Xfrm>,
-          ProcessorsConfig<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>,
-          PeerStateConfig) {
+    ) -> (
+        ClientsConfig<Channel, Flows, Epochs, LargeObj, Xfrm>,
+        ProcessorsConfig<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>,
+        PeerStateConfig
+    ) {
         (self.clients, self.processors, self.state)
     }
 }
@@ -490,7 +502,13 @@ where
         ProcessorClassesConfig<Prin>,
         AuthN
     ) {
-        (self.registry, self.bus, self.large_obj, self.processors, self.authn)
+        (
+            self.registry,
+            self.bus,
+            self.large_obj,
+            self.processors,
+            self.authn
+        )
     }
 }
 
@@ -506,7 +524,7 @@ impl StandaloneConfig {
             <AscendingCount<u128> as IDGen>::Config,
             LargeObjProtoConfig<(), ()>,
             TestAuthNConfig<String, TestCredConfig>,
-            CompoundXfrmCreateParam<(), ()>,
+            CompoundXfrmCreateParam<(), ()>
         >
     ) -> Self {
         StandaloneConfig {
@@ -530,7 +548,7 @@ impl StandaloneConfig {
         <AscendingCount<u128> as IDGen>::Config,
         LargeObjProtoConfig<(), ()>,
         TestAuthNConfig<String, TestCredConfig>,
-        CompoundXfrmCreateParam<(), ()>,
+        CompoundXfrmCreateParam<(), ()>
     > {
         &self.peer
     }
@@ -547,7 +565,7 @@ impl StandaloneConfig {
             <AscendingCount<u128> as IDGen>::Config,
             LargeObjProtoConfig<(), ()>,
             TestAuthNConfig<String, TestCredConfig>,
-            CompoundXfrmCreateParam<(), ()>,
+            CompoundXfrmCreateParam<(), ()>
         >
     ) {
         (self.name_caches, self.peer)
@@ -562,9 +580,7 @@ use uuid::uuid;
 
 #[test]
 fn test_class_id_uuid() {
-    let yaml = concat!(
-        "uuid: 67e55044-10b1-426f-9247-bb680e5fe0c8"
-    );
+    let yaml = concat!("uuid: 67e55044-10b1-426f-9247-bb680e5fe0c8");
     let expected = ClassIDConfig::UUID {
         uuid: uuid!("67e55044-10b1-426f-9247-bb680e5fe0c8")
     };
@@ -575,9 +591,7 @@ fn test_class_id_uuid() {
 
 #[test]
 fn test_class_id_name() {
-    let yaml = concat!(
-        "name: org.constellation.test"
-    );
+    let yaml = concat!("name: org.constellation.test");
     let expected = ClassIDConfig::Name {
         name: String::from("org.constellation.test")
     };
@@ -588,8 +602,8 @@ fn test_class_id_name() {
 
 #[test]
 fn test_class_config_no_instances() {
-    let version = VersionRangeConfig::try_from("<=1")
-        .expect("Expected success");
+    let version =
+        VersionRangeConfig::try_from("<=1").expect("Expected success");
     let yaml = concat!(
         "name: org.constellation.test\n",
         "versions:\n",
@@ -609,8 +623,8 @@ fn test_class_config_no_instances() {
 
 #[test]
 fn test_class_config_instances() {
-    let version = VersionRangeConfig::try_from("<=1")
-        .expect("Expected success");
+    let version =
+        VersionRangeConfig::try_from("<=1").expect("Expected success");
     let yaml = concat!(
         "name: org.constellation.test\n",
         "instances:\n",
@@ -633,8 +647,8 @@ fn test_class_config_instances() {
 
 #[test]
 fn test_processor_config() {
-    let version = VersionRangeConfig::try_from("<=1")
-        .expect("Expected success");
+    let version =
+        VersionRangeConfig::try_from("<=1").expect("Expected success");
     let yaml = concat!(
         "principal: test-principal\n",
         "classes:\n",
@@ -647,15 +661,13 @@ fn test_processor_config() {
     );
     let expected = ProcessorConfig {
         principal: "test-principal",
-        classes: vec![
-            ClassConfig {
-                id: ClassIDConfig::Name {
-                    name: String::from("org.constellation.test")
-                },
-                instances: vec![0, 1],
-                versions: vec![version]
-            }
-        ]
+        classes: vec![ClassConfig {
+            id: ClassIDConfig::Name {
+                name: String::from("org.constellation.test")
+            },
+            instances: vec![0, 1],
+            versions: vec![version]
+        }]
     };
     let actual = serde_yaml::from_str(yaml).unwrap();
 
@@ -664,8 +676,7 @@ fn test_processor_config() {
 
 #[test]
 fn test_static_processor_configs() {
-    let version = VersionRangeConfig::try_from("*")
-        .expect("Expected success");
+    let version = VersionRangeConfig::try_from("*").expect("Expected success");
     let yaml = concat!(
         "static:\n",
         "  - principal: test-processor\n",
@@ -675,20 +686,16 @@ fn test_static_processor_configs() {
         "          - \"*\"\n"
     );
     let expected = ProcessorClassesConfig::Static {
-        stat: vec![
-            ProcessorConfig {
-                principal: "test-processor",
-                classes: vec![
-                    ClassConfig {
-                        id: ClassIDConfig::Name {
-                            name: String::from("org.constellation.test")
-                        },
-                        instances: vec![0],
-                        versions: vec![version]
-                    }
-                ]
-            }
-        ]
+        stat: vec![ProcessorConfig {
+            principal: "test-processor",
+            classes: vec![ClassConfig {
+                id: ClassIDConfig::Name {
+                    name: String::from("org.constellation.test")
+                },
+                instances: vec![0],
+                versions: vec![version]
+            }]
+        }]
     };
     let actual = serde_yaml::from_str(yaml).unwrap();
 

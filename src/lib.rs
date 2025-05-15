@@ -21,5 +21,6 @@
 pub mod clients;
 pub mod component;
 pub mod config;
+pub mod processors;
 
 mod state;
