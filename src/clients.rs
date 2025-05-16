@@ -204,7 +204,7 @@ where
         let (notifies, next) =
             self.state.get_client_msgs(&mut subscriptions, &prin)?;
 
-        if notifies.len() != 0 {
+        if !notifies.is_empty() {
             let batch = XactBlobBatch::new(vec![], vec![], notifies);
 
             sender

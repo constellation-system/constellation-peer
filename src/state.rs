@@ -383,7 +383,15 @@ where
     ) -> (DeleteAction, Option<Instant>)
     where
         H: Clone + Display + HashID {
+        trace!(target: "peer-state",
+               "generating client message for transactions {}",
+               hash);
+
         if let Some(report) = self.reporting.get_mut(client) {
+            trace!(target: "peer-state",
+                   "found reporting info for {}",
+                   client);
+
             if let Some(when) = report.when {
                 // XXX manage retry state correctly.  We don't yet
                 // have acknowledgements worked out here.
@@ -410,6 +418,9 @@ where
 
                 (action, next)
             } else {
+                trace!(target: "peer-state",
+                       "not time to report yet");
+
                 (DeleteAction::Retain, None)
             }
         } else {
@@ -445,7 +456,6 @@ where
             Some(size) => HashMap::with_capacity(size),
             None => HashMap::new()
         };
-        let processors = processors;
         let missing = Mutex::new(missing);
         let xacts = Mutex::new(xacts);
         let seals = Mutex::new(seals);
@@ -547,7 +557,7 @@ where
 
                     let req = XactUncommittedHashReq::new(
                         hash.clone(),
-                        class.clone(),
+                        *class,
                         version.clone(),
                         *instance,
                         payload.clone(),
@@ -559,7 +569,7 @@ where
                 }
                 _ => {
                     trace!(target: "peer-state",
-                           "checking for transaction {}",
+                           "skipping transaction {}",
                            hash);
                 }
             }
@@ -631,7 +641,7 @@ where
                                         };
 
                                         reqs.push(XactCommittedReq::new(
-                                            class.clone(),
+                                            *class,
                                             version.clone(),
                                             *instance,
                                             i,
@@ -1034,6 +1044,10 @@ where
         lin_point: XactLinPoint<u128>,
         res: Vec<u8>
     ) -> Result<(), MutexPoison> {
+        debug!(target: "peer-state",
+               "recording result for {}",
+               hash);
+
         if let Some(xact) =
             self.xacts.lock().map_err(|_| MutexPoison)?.get_mut(&hash)
         {
@@ -1155,6 +1169,13 @@ where
                            "setting transaction {} to completed",
                            hash);
 
+                    // Set reporting to report messages immediately.
+                    let now = Instant::now();
+
+                    for report in xact.reporting.values_mut() {
+                        report.when = Some(now);
+                    }
+
                     // XXX should wait until all notifications are done to
                     // expire.
                     let expire = Instant::now() + self.tombstone_duration;
@@ -1170,6 +1191,13 @@ where
                     debug!(target: "peer-state",
                            "setting transaction {} to internal error",
                            hash);
+
+                    // Set reporting to report messages immediately.
+                    let now = Instant::now();
+
+                    for report in xact.reporting.values_mut() {
+                        report.when = Some(now);
+                    }
 
                     // XXX should wait until all notifications are done to
                     // expire.
@@ -1197,6 +1225,10 @@ where
         hash: H,
         error: XactError<Vec<u8>>
     ) -> Result<(), MutexPoison> {
+        debug!(target: "peer-state",
+               "recording error for {}",
+               hash);
+
         if let Some(xact) =
             self.xacts.lock().map_err(|_| MutexPoison)?.get_mut(&hash)
         {

@@ -659,7 +659,7 @@ impl Standalone
                 let class: Uuid = class.into();
                 let instance = InstanceEntry::new(id.clone(), versions);
 
-                match classes.entry(class.clone()) {
+                match classes.entry(class) {
                     Entry::Vacant(ent) => {
                         let ent = ent.insert(HashMap::new());
 

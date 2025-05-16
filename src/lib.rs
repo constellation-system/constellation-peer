@@ -16,6 +16,7 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 #![allow(clippy::redundant_field_names)]
+#![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 
 pub mod clients;

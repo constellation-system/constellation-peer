@@ -270,8 +270,7 @@ impl ClassConfig {
     where
         I: Iterator<Item = usize>,
         J: Iterator<Item = VersionRange> {
-        let versions =
-            versions.map(|val| VersionRangeConfig::from(val)).collect();
+        let versions = versions.map(VersionRangeConfig::from).collect();
         let instances = instances.collect();
 
         ClassConfig {

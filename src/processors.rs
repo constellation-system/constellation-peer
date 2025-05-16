@@ -200,7 +200,7 @@ where
         let (committed, reqs, next) =
             self.state.get_processor_msgs(self.idx.clone())?;
 
-        if committed.len() != 0 || reqs.len() != 0 {
+        if !committed.is_empty() || !reqs.is_empty() {
             let batch = XactBlobBatch::new(committed, reqs, vec![]);
 
             sender
