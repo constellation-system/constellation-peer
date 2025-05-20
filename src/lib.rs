@@ -22,6 +22,7 @@
 pub mod clients;
 pub mod component;
 pub mod config;
+pub mod consensus;
 pub mod processors;
 
 mod state;

@@ -479,13 +479,13 @@ where
 
     pub(crate) fn get_consensus_msgs(
         &self
-    ) -> Result<(Vec<ConsensusCtlSubmit<H>>, Option<Instant>), MutexPoison>
+    ) -> Result<(Option<ConsensusCtlSubmit<H>>, Option<Instant>), MutexPoison>
     {
         trace!(target: "peer-state",
                "checking for commit-stage transactions");
 
         let mut xacts = self.xacts.lock().map_err(|_| MutexPoison)?;
-        let msgs = Vec::with_capacity(xacts.len());
+        let mut hashes = Vec::with_capacity(xacts.len());
 
         for (hash, ent) in xacts.iter_mut() {
             match &mut ent.state {
@@ -499,17 +499,24 @@ where
                            "submitting transaction {} to consensus",
                            hash);
 
+                    hashes.push(hash.clone());
                     *submitted = true
                 }
                 _ => {
                     trace!(target: "peer-state",
-                           "checking for transaction {}",
+                           "skipping transaction {}",
                            hash);
                 }
             }
         }
 
-        Ok((msgs, None))
+        let msg = if !hashes.is_empty() {
+            Some(ConsensusCtlSubmit::new(hashes))
+        } else {
+            None
+        };
+
+        Ok((msg, None))
     }
 
     pub(crate) fn get_processor_msgs(

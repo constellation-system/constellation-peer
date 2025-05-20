@@ -20,8 +20,10 @@ use std::time::Duration;
 
 use constellation_auth::config::TestAuthNConfig;
 use constellation_auth::config::TestCredConfig;
+use constellation_channels::config::ChannelRegistryChannelsConfig;
 use constellation_channels::config::ChannelRegistryConfig;
 use constellation_channels::config::CompoundFarChannelConfig;
+use constellation_channels::config::CompoundFarEndpoint;
 use constellation_channels::config::CompoundXfrmCreateParam;
 use constellation_channels::config::ThreadedFlowsParams;
 #[cfg(feature = "standalone")]
@@ -34,6 +36,7 @@ use constellation_common::ids::IDGen;
 use constellation_common::retry::Retry;
 use constellation_common::version::VersionRange;
 use constellation_component_common::config::DispatchLargeObjBusConfig;
+use constellation_component_common::config::MulticastLargeObjBusConfig;
 use constellation_streams::config::LargeObjProtoConfig;
 use serde::Deserialize;
 use serde::Serialize;
@@ -42,17 +45,28 @@ use uuid::Uuid;
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename = "peer-config")]
 #[serde(rename_all = "kebab-case")]
-pub struct PeerConfig<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>
-where
+pub struct PeerConfig<
+    Prin,
+    Channel,
+    Flows,
+    Epochs,
+    LargeObj,
+    AuthN,
+    Xfrm,
+    Endpoint
+> where
     Epochs: Default,
     Flows: Default,
     LargeObj: Default,
     Xfrm: Default {
     /// Configuration for incoming client connections.
-    clients: ClientsConfig<Channel, Flows, Epochs, LargeObj, Xfrm>,
+    clients: ClientsConfig<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>,
     /// Configuration for processors.
     processors:
         ProcessorsConfig<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>,
+    /// Configuration for consensus.
+    consensus:
+        ConsensusConfig<Prin, Channel, Flows, Epochs, LargeObj, Xfrm, Endpoint>,
     /// Configuration for the peer state.
     #[serde(default)]
     #[serde(flatten)]
@@ -151,7 +165,7 @@ where
 #[derive(Clone, Debug, Deserialize, PartialEq, PartialOrd, Serialize)]
 #[serde(rename = "clients")]
 #[serde(rename_all = "kebab-case")]
-pub struct ClientsConfig<Channel, Flows, Epochs, LargeObj, Xfrm>
+pub struct ClientsConfig<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>
 where
     Epochs: Default,
     Flows: Default,
@@ -164,6 +178,38 @@ where
     #[serde(default)]
     #[serde(flatten)]
     bus: DispatchLargeObjBusConfig<Epochs>,
+    #[serde(default)]
+    large_obj: LargeObj,
+    authn: AuthN
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, PartialOrd, Serialize)]
+#[serde(rename = "consensus")]
+#[serde(rename_all = "kebab-case")]
+pub struct ConsensusConfig<
+    Prin,
+    Channel,
+    Flows,
+    Epochs,
+    LargeObj,
+    Xfrm,
+    Endpoint
+> where
+    Epochs: Default,
+    Flows: Default,
+    LargeObj: Default,
+    Xfrm: Default {
+    /// Channel registry configuration.
+    #[serde(flatten)]
+    registry: ChannelRegistryConfig<Channel, Flows, Xfrm>,
+    /// Configuration for the dispatch comm subsystem.
+    #[serde(flatten)]
+    multicast: MulticastLargeObjBusConfig<
+        Prin,
+        ChannelRegistryChannelsConfig<()>,
+        Epochs,
+        Endpoint
+    >,
     #[serde(default)]
     large_obj: LargeObj
 }
@@ -191,7 +237,8 @@ pub struct StandaloneConfig {
         <AscendingCount<u128> as IDGen>::Config,
         LargeObjProtoConfig<(), ()>,
         TestAuthNConfig<String, TestCredConfig>,
-        CompoundXfrmCreateParam<(), ()>
+        CompoundXfrmCreateParam<(), ()>,
+        CompoundFarEndpoint
     >
 }
 
@@ -332,8 +379,8 @@ impl<Prin> ProcessorConfig<Prin> {
     }
 }
 
-impl<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>
-    PeerConfig<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>
+impl<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm, Endpoint>
+    PeerConfig<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm, Endpoint>
 where
     Epochs: Default,
     Flows: Default,
@@ -342,7 +389,7 @@ where
 {
     #[inline]
     pub fn new(
-        clients: ClientsConfig<Channel, Flows, Epochs, LargeObj, Xfrm>,
+        clients: ClientsConfig<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>,
         processors: ProcessorsConfig<
             Prin,
             Channel,
@@ -352,10 +399,20 @@ where
             AuthN,
             Xfrm
         >,
+        consensus: ConsensusConfig<
+            Prin,
+            Channel,
+            Flows,
+            Epochs,
+            LargeObj,
+            Xfrm,
+            Endpoint
+        >,
         state: PeerStateConfig
     ) -> Self {
         PeerConfig {
             processors: processors,
+            consensus: consensus,
             clients: clients,
             state: state
         }
@@ -364,7 +421,7 @@ where
     #[inline]
     pub fn clients(
         &self
-    ) -> &ClientsConfig<Channel, Flows, Epochs, LargeObj, Xfrm> {
+    ) -> &ClientsConfig<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm> {
         &self.clients
     }
 
@@ -377,6 +434,14 @@ where
     }
 
     #[inline]
+    pub fn consensus(
+        &self
+    ) -> &ConsensusConfig<Prin, Channel, Flows, Epochs, LargeObj, Xfrm, Endpoint>
+    {
+        &self.consensus
+    }
+
+    #[inline]
     pub fn state(&self) -> &PeerStateConfig {
         &self.state
     }
@@ -385,16 +450,82 @@ where
     pub fn take(
         self
     ) -> (
-        ClientsConfig<Channel, Flows, Epochs, LargeObj, Xfrm>,
+        ClientsConfig<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>,
         ProcessorsConfig<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>,
+        ConsensusConfig<Prin, Channel, Flows, Epochs, LargeObj, Xfrm, Endpoint>,
         PeerStateConfig
     ) {
-        (self.clients, self.processors, self.state)
+        (self.clients, self.processors, self.consensus, self.state)
     }
 }
 
-impl<Channel, Flows, Epochs, LargeObj, Xfrm>
-    ClientsConfig<Channel, Flows, Epochs, LargeObj, Xfrm>
+impl<Prin, Channel, Flows, Epochs, LargeObj, Xfrm, Endpoint>
+    ConsensusConfig<Prin, Channel, Flows, Epochs, LargeObj, Xfrm, Endpoint>
+where
+    Epochs: Default,
+    Flows: Default,
+    LargeObj: Default,
+    Xfrm: Default
+{
+    #[inline]
+    pub fn new(
+        registry: ChannelRegistryConfig<Channel, Flows, Xfrm>,
+        multicast: MulticastLargeObjBusConfig<
+            Prin,
+            ChannelRegistryChannelsConfig<()>,
+            Epochs,
+            Endpoint
+        >,
+        large_obj: LargeObj
+    ) -> Self {
+        ConsensusConfig {
+            multicast: multicast,
+            registry: registry,
+            large_obj: large_obj
+        }
+    }
+
+    #[inline]
+    pub fn registry(&self) -> &ChannelRegistryConfig<Channel, Flows, Xfrm> {
+        &self.registry
+    }
+
+    #[inline]
+    pub fn multicast(
+        &self
+    ) -> &MulticastLargeObjBusConfig<
+        Prin,
+        ChannelRegistryChannelsConfig<()>,
+        Epochs,
+        Endpoint
+    > {
+        &self.multicast
+    }
+
+    #[inline]
+    pub fn large_obj(&self) -> &LargeObj {
+        &self.large_obj
+    }
+
+    #[inline]
+    pub fn take(
+        self
+    ) -> (
+        ChannelRegistryConfig<Channel, Flows, Xfrm>,
+        MulticastLargeObjBusConfig<
+            Prin,
+            ChannelRegistryChannelsConfig<()>,
+            Epochs,
+            Endpoint
+        >,
+        LargeObj
+    ) {
+        (self.registry, self.multicast, self.large_obj)
+    }
+}
+
+impl<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>
+    ClientsConfig<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>
 where
     Epochs: Default,
     Flows: Default,
@@ -405,11 +536,13 @@ where
     pub fn new(
         registry: ChannelRegistryConfig<Channel, Flows, Xfrm>,
         bus: DispatchLargeObjBusConfig<Epochs>,
-        large_obj: LargeObj
+        large_obj: LargeObj,
+        authn: AuthN
     ) -> Self {
         ClientsConfig {
             large_obj: large_obj,
             registry: registry,
+            authn: authn,
             bus: bus
         }
     }
@@ -430,14 +563,20 @@ where
     }
 
     #[inline]
+    pub fn authn(&self) -> &AuthN {
+        &self.authn
+    }
+
+    #[inline]
     pub fn take(
         self
     ) -> (
         ChannelRegistryConfig<Channel, Flows, Xfrm>,
         DispatchLargeObjBusConfig<Epochs>,
-        LargeObj
+        LargeObj,
+        AuthN
     ) {
-        (self.registry, self.bus, self.large_obj)
+        (self.registry, self.bus, self.large_obj, self.authn)
     }
 }
 
@@ -523,7 +662,8 @@ impl StandaloneConfig {
             <AscendingCount<u128> as IDGen>::Config,
             LargeObjProtoConfig<(), ()>,
             TestAuthNConfig<String, TestCredConfig>,
-            CompoundXfrmCreateParam<(), ()>
+            CompoundXfrmCreateParam<(), ()>,
+            CompoundFarEndpoint
         >
     ) -> Self {
         StandaloneConfig {
@@ -547,7 +687,8 @@ impl StandaloneConfig {
         <AscendingCount<u128> as IDGen>::Config,
         LargeObjProtoConfig<(), ()>,
         TestAuthNConfig<String, TestCredConfig>,
-        CompoundXfrmCreateParam<(), ()>
+        CompoundXfrmCreateParam<(), ()>,
+        CompoundFarEndpoint
     > {
         &self.peer
     }
@@ -564,7 +705,8 @@ impl StandaloneConfig {
             <AscendingCount<u128> as IDGen>::Config,
             LargeObjProtoConfig<(), ()>,
             TestAuthNConfig<String, TestCredConfig>,
-            CompoundXfrmCreateParam<(), ()>
+            CompoundXfrmCreateParam<(), ()>,
+            CompoundFarEndpoint
         >
     ) {
         (self.name_caches, self.peer)
