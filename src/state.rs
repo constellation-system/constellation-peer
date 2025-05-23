@@ -289,45 +289,83 @@ where
             PeerXactState::Pending { stage, effects, .. } => match stage {
                 PendingXactStage::PreCommit {
                     dispatched: false, ..
-                } => (XactNotifyState::Accept, false),
+                } => {
+                    trace!(target: "peer-state",
+                           "generating accept message for {}",
+                           hash);
+
+                    (XactNotifyState::Accept, false)
+                }
                 PendingXactStage::PreCommit {
                     dispatched: true, ..
                 } => match effects {
-                    XactEffects::HardNone { when } => (
-                        XactNotifyState::PrecommitDispatch {
-                            when: when.clone()
-                        },
-                        false
-                    ),
-                    _ => (
-                        XactNotifyState::PrecommitDispatch { when: None },
-                        false
-                    )
+                    XactEffects::HardNone { when } => {
+                        trace!(target: "peer-state",
+                               "generating precommit dispatch message for {}",
+                               hash);
+
+                        (
+                            XactNotifyState::PrecommitDispatch {
+                                when: when.clone()
+                            },
+                            false
+                        )
+                    }
+                    _ => {
+                        trace!(target: "peer-state",
+                               "generating precommit dispatch message for {}",
+                               hash);
+
+                        (
+                            XactNotifyState::PrecommitDispatch { when: None },
+                            false
+                        )
+                    }
                 },
                 PendingXactStage::Commit { submitted: false } => {
+                    trace!(target: "peer-state",
+                           "generating accept message for {}",
+                           hash);
+
                     (XactNotifyState::Accept, false)
                 }
                 PendingXactStage::Commit { submitted: true } => {
+                    trace!(target: "peer-state",
+                           "generating consensus message for {}",
+                           hash);
+
                     (XactNotifyState::Consensus, false)
                 }
                 PendingXactStage::Process {
                     dispatched: false,
                     lin_point
-                } => (
-                    XactNotifyState::Commit {
-                        when: lin_point.clone()
-                    },
-                    false
-                ),
+                } => {
+                    trace!(target: "peer-state",
+                           "generating commit message for {}",
+                           hash);
+
+                    (
+                        XactNotifyState::Commit {
+                            when: lin_point.clone()
+                        },
+                        false
+                    )
+                }
                 PendingXactStage::Process {
                     dispatched: true,
                     lin_point
-                } => (
-                    XactNotifyState::Dispatch {
-                        when: lin_point.clone()
-                    },
-                    false
-                )
+                } => {
+                    trace!(target: "peer-state",
+                           "generating dispatch message for {}",
+                           hash);
+
+                    (
+                        XactNotifyState::Dispatch {
+                            when: lin_point.clone()
+                        },
+                        false
+                    )
+                }
             },
             PeerXactState::Complete {
                 expire,
@@ -335,6 +373,10 @@ where
                 res
             } => {
                 if full {
+                    trace!(target: "peer-state",
+                           "generating full success message for {}",
+                           hash);
+
                     (
                         XactNotifyState::Success {
                             result: Some(res.clone()),
@@ -343,6 +385,10 @@ where
                         *expire <= now
                     )
                 } else {
+                    trace!(target: "peer-state",
+                           "generating empty success message for {}",
+                           hash);
+
                     (
                         XactNotifyState::Success {
                             when: lin_point.clone(),
@@ -354,6 +400,10 @@ where
             }
             PeerXactState::Error { expire, error } => {
                 if full {
+                    trace!(target: "peer-state",
+                           "generating full error message for {}",
+                           hash);
+
                     (
                         XactNotifyState::Error {
                             error: Some(error.clone())
@@ -361,6 +411,10 @@ where
                         *expire <= now
                     )
                 } else {
+                    trace!(target: "peer-state",
+                           "generating empty error message for {}",
+                           hash);
+
                     (XactNotifyState::Error { error: None }, *expire <= now)
                 }
             }
@@ -500,7 +554,8 @@ where
                            hash);
 
                     hashes.push(hash.clone());
-                    *submitted = true
+                    *submitted = true;
+                    ent.reset_reporting();
                 }
                 _ => {
                     trace!(target: "peer-state",
@@ -572,7 +627,8 @@ where
                     );
 
                     reqs.push(XactSealed::new(seal.clone(), req));
-                    *dispatched = true
+                    *dispatched = true;
+                    ent.reset_reporting();
                 }
                 _ => {
                     trace!(target: "peer-state",
@@ -1192,6 +1248,7 @@ where
                         expire: expire,
                         res: res
                     };
+                    xact.reset_reporting();
                     self.notify.notify().map_err(|_| MutexPoison)?;
                 }
                 ResultState::Error => {
@@ -1214,6 +1271,7 @@ where
                         error: XactError::Internal,
                         expire: expire
                     };
+                    xact.reset_reporting();
                     self.notify.notify().map_err(|_| MutexPoison)?;
                 }
                 ResultState::Ignore => {}
@@ -1331,6 +1389,7 @@ where
                         expire: expire,
                         error: error
                     };
+                    xact.reset_reporting();
                     self.notify.notify().map_err(|_| MutexPoison)?;
                 }
                 ResultState::Error => {
@@ -1346,6 +1405,7 @@ where
                         error: XactError::Internal,
                         expire: expire
                     };
+                    xact.reset_reporting();
                     self.notify.notify().map_err(|_| MutexPoison)?;
                 }
                 ResultState::Ignore => {}
@@ -1410,6 +1470,7 @@ where
                             lin_point: XactLinPoint::new(round, i),
                             dispatched: false
                         };
+                        ent.reset_reporting();
                     } else {
                         // This should never happen, but we can skip it.
                         error!(target: "peer-state",
