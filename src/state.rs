@@ -641,6 +641,7 @@ where
         // Scan consensus seals.
         let mut seals = self.seals.lock().map_err(|_| MutexPoison)?;
         let mut rounds = Vec::with_capacity(seals.len());
+        let mut deletes = Vec::with_capacity(seals.len());
 
         for (round, seal) in seals.iter_mut() {
             if let Some(retry) = seal.retries.get_mut(&target) {
@@ -729,10 +730,12 @@ where
                                 }
                                 // Transaction is in the wrong state.
                                 _ => {
-                                    error!(target: "peer-state",
-                                           concat!("transaction {} isn't in ",
-                                                   "pending state"),
+                                    trace!(target: "peer-state",
+                                           "marking transaction {} complete",
                                            hash);
+
+                                    seal.completed.set(i, true);
+                                    panic!();
                                 }
                             }
                         } else {
@@ -743,11 +746,15 @@ where
                         }
                     }
 
-                    debug!(target: "peer-state",
-                           "submitting round {} to {}",
-                           round, target);
+                    if !reqs.is_empty() {
+                        debug!(target: "peer-state",
+                               "submitting round {} to {}",
+                               round, target);
 
-                    rounds.push(XactCommittedRound::new(*round, None, reqs));
+                        let round = XactCommittedRound::new(*round, None, reqs);
+
+                        rounds.push(round);
+                    }
                 } else {
                     // There are transactions left, but we don't have them yet.
 
@@ -755,6 +762,26 @@ where
                            "no transactions available for seal for round {}",
                            round);
                 }
+
+                if seal.completed.all() {
+                    trace!(target: "peer-state",
+                           "all trasaction for round {} are complete",
+                           round);
+
+                    deletes.push(*round);
+                }
+            }
+        }
+
+        for round in deletes {
+            debug!(target: "peer-state",
+                   "deleting seal for round {}",
+                   round);
+
+            if seals.remove(&round).is_none() {
+                error!(target: "peer-state",
+                       "round {} was not in seals table",
+                       round);
             }
         }
 

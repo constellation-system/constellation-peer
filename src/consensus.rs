@@ -16,7 +16,6 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
-use std::collections::HashMap;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::marker::PhantomData;
