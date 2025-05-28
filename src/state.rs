@@ -735,7 +735,6 @@ where
                                            hash);
 
                                     seal.completed.set(i, true);
-                                    panic!();
                                 }
                             }
                         } else {
