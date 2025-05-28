@@ -16,6 +16,9 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
+use std::convert::TryFrom;
 use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
@@ -29,7 +32,9 @@ use clap::ArgMatches;
 use constellation_auth::authn::MsgAuthN;
 use constellation_auth::authn::PassthruMsgAuthN;
 use constellation_auth::authn::SessionAuthN;
-use constellation_auth::authn::TrivialAuthN;
+use constellation_auth::authn::TestAuthN;
+use constellation_auth::config::TestCredConfig;
+use constellation_channels::config::ChannelRegistryChannelsConfig;
 use constellation_channels::config::CompoundFarEndpoint;
 use constellation_channels::config::ResolverConfig;
 use constellation_channels::far::compound::CompoundFarChannel;
@@ -41,6 +46,7 @@ use constellation_channels::far::flows::ThreadedFlowsListener;
 #[cfg(feature = "standalone")]
 use constellation_channels::far::registry::CompoundFarChannelRegistry;
 use constellation_channels::far::registry::FarChannelRegistryAcquireError;
+use constellation_channels::far::registry::FarChannelRegistryChannelsCreateError;
 use constellation_channels::far::registry::FarChannelRegistryCtx;
 use constellation_channels::far::registry::FarChannelRegistryID;
 use constellation_channels::far::registry::RegistryAcquireError;
@@ -72,9 +78,16 @@ use constellation_common::version::VersionSuffix;
 use constellation_component_common::bus::large_obj::dispatch::DispatchLargeObjBus;
 use constellation_component_common::bus::large_obj::dispatch::DispatchLargeObjBusCleanup;
 use constellation_component_common::bus::large_obj::dispatch::DispatchLargeObjBusCreateError;
+use constellation_component_common::bus::large_obj::multicast::MulticastLargeObjBus;
+use constellation_component_common::bus::large_obj::multicast::MulticastLargeObjBusCleanup;
+use constellation_component_common::bus::large_obj::multicast::MulticastLargeObjBusRunError;
 use constellation_component_common::config::DispatchLargeObjBusConfig;
-use constellation_component_common::xact::XactBatch;
-use constellation_component_common::xact::XactBatchCodec;
+use constellation_component_common::config::MulticastLargeObjBusConfig;
+use constellation_component_common::config::PartiesConfig;
+use constellation_component_common::consensus_ctl::ConsensusCtl;
+use constellation_component_common::consensus_ctl::ConsensusCtlCodec;
+use constellation_component_common::xact::XactBatchBlobCodec;
+use constellation_component_common::xact::XactBlobBatch;
 #[cfg(feature = "standalone")]
 use constellation_standalone::Standalone;
 #[cfg(feature = "standalone")]
@@ -86,51 +99,72 @@ use constellation_streams::config::LargeObjProtoConfig;
 use constellation_streams::large_obj::LargeObjID;
 use constellation_streams::large_obj::LargeObjMsg;
 use constellation_streams::large_obj::LargeObjMsgCodec;
+use constellation_streams::large_obj::LargeObjProto;
+use constellation_streams::large_obj::LargeObjProtoCreateError;
+use constellation_streams::select::StreamSelectorCreateError;
+use constellation_streams::select::ThreadedStreamSelectorError;
 use constellation_streams::stream::ConcurrentStream;
 use constellation_streams::stream::StreamID;
 use log::debug;
 use log::error;
 use log::info;
+use log::warn;
+use uuid::Uuid;
 
 use crate::clients::ClientSessionDispatch;
+use crate::config::PeerStateConfig;
+use crate::config::ProcessorClassesConfig;
 #[cfg(feature = "standalone")]
 use crate::config::StandaloneConfig;
+use crate::consensus::ConsensusMsgs;
+use crate::consensus::ConsensusRecv;
+use crate::processors::ProcessorSessionDispatch;
+use crate::state::InstanceEntry;
+use crate::state::PeerState;
+use crate::state::ProcessorEntry;
+use crate::state::ProcessorIdx;
 
 pub type CompoundPeerComponent<
-    Wrapper,
-    WrapperCodec,
+    XactWrapper,
+    XactWrapperCodec,
     H,
     IDs,
-    MsgAuth,
+    XactMsgAuth,
+    CtlMsgAuth,
     Epochs,
     Ctx
 > = PeerComponent<
-    Wrapper,
-    WrapperCodec,
+    XactWrapper,
+    XactWrapperCodec,
     H,
     IDs,
-    MsgAuth,
+    XactMsgAuth,
+    CtlMsgAuth,
     Epochs,
     CompoundFarChannel,
     CompoundFarChannelThreadedFlows<
-        TrivialAuthN<TestCred>,
+        Arc<TestAuthN<String, TestCred>>,
         UnixDatagramXfrm,
         UDPDatagramXfrm,
         FarChannelRegistryID
     >,
-    TrivialAuthN<TestCred>,
+    Arc<TestAuthN<String, TestCred>>,
     CompoundFarChannelXfrm<UnixDatagramXfrm, UDPDatagramXfrm>,
     MixedResolver<CompoundFarChannelXfrmPeerAddr, CompoundFarEndpoint>,
     CompoundFarEndpoint,
     Ctx
 >;
 
+// XXX this is going to need separate session authenticators, and
+// ultimately a whole separate instantiation of the flows types.  This
+// is best done with type traits, when we get to that.
 pub struct PeerComponent<
-    Wrapper,
-    WrapperCodec,
+    XactWrapper,
+    XactWrapperCodec,
     H,
     IDs,
-    MsgAuth,
+    XactMsgAuth,
+    CtlMsgAuth,
     Epochs,
     Channel,
     F,
@@ -140,12 +174,27 @@ pub struct PeerComponent<
     Endpoint,
     Ctx
 > where
-    Wrapper: 'static + Clone + Send,
-    MsgAuth: 'static
+    XactWrapper: 'static + Clone + Send,
+    XactMsgAuth: 'static
         + Clone
-        + MsgAuthN<XactBatch<H::HashID>, Wrapper, SessionPrin = SessionAuth::Prin>
+        + MsgAuthN<
+            XactBlobBatch<u128, H::HashID, TestSeal>,
+            XactWrapper,
+            SessionPrin = SessionAuth::Prin,
+            Prin = SessionAuth::Prin
+        >
         + Send,
-    MsgAuth::SessionPrin: Send + Sync,
+    XactMsgAuth::SessionPrin: Send + Sync,
+    CtlMsgAuth: 'static
+        + Clone
+        + MsgAuthN<
+            ConsensusCtl<u128, H::HashID, TestSeal>,
+            ConsensusCtl<u128, H::HashID, TestSeal>,
+            SessionPrin = SessionAuth::Prin,
+            Prin = SessionAuth::Prin
+        >
+        + Send,
+    CtlMsgAuth::SessionPrin: Send + Sync,
     IDs: 'static + Clone + IDGen + Iterator<Item = LargeObjID> + Send,
     H: 'static + Clone + Default + HashAlgo + Send,
     H::HashID: 'static + Clone + Display + Hash + Eq + Send,
@@ -155,9 +204,9 @@ pub struct PeerComponent<
         + Send
         + Sync,
     SessionAuth::Prin: 'static + Clone + Display + Eq + Hash + Send + Sync,
-    WrapperCodec: 'static + Clone + Codec<Wrapper> + Send,
-    <WrapperCodec as Codec<Wrapper>>::Param: Default,
-    Epochs: 'static + IDGen + Iterator<Item = u128> + Send + Sync,
+    XactWrapperCodec: 'static + Clone + Codec<XactWrapper> + Send,
+    <XactWrapperCodec as Codec<XactWrapper>>::Param: Default,
+    Epochs: 'static + Default + IDGen + Iterator<Item = u128> + Send + Sync,
     Epochs::Config: Clone + Send,
     Channel: 'static
         + FarChannelOwnedFlows<F, SessionAuth, Xfrm>
@@ -201,19 +250,42 @@ pub struct PeerComponent<
         Clone + Eq + Hash + Into<Option<IPEndpointAddr>> + Send + Sync,
     Endpoint: Clone + Send + Sync,
     Ctx: 'static + NSNameCachesCtx + Send + Sync {
-    wrapper: PhantomData<Wrapper>,
-    codec: PhantomData<WrapperCodec>,
+    xact_wrapper: PhantomData<XactWrapper>,
+    xact_codec: PhantomData<XactWrapperCodec>,
     hash: PhantomData<H>,
-    auth: PhantomData<MsgAuth>,
+    xact_auth: PhantomData<XactMsgAuth>,
+    ctl_auth: PhantomData<CtlMsgAuth>,
     ids: PhantomData<IDs>,
     resolver: PhantomData<Resolver>,
     endpoint: PhantomData<Endpoint>,
     client_comm_config: DispatchLargeObjBusConfig<Epochs::Config>,
-    large_obj_config: LargeObjProtoConfig<
-        <XactBatchCodec<H> as Codec<XactBatch<H::HashID>>>::Param,
+    client_large_obj_config: LargeObjProtoConfig<
+        <XactBatchBlobCodec<u128, H, TestSeal, TestSealCodec> as Codec<
+            XactBlobBatch<u128, H::HashID, TestSeal>
+        >>::Param,
         IDs::Config
     >,
-    listener: ThreadedFlowsListener<
+    processor_comm_config: DispatchLargeObjBusConfig<Epochs::Config>,
+    processor_large_obj_config: LargeObjProtoConfig<
+        <XactBatchBlobCodec<u128, H, TestSeal, TestSealCodec> as Codec<
+            XactBlobBatch<u128, H::HashID, TestSeal>
+        >>::Param,
+        IDs::Config
+    >,
+    consensus_comm_config: MulticastLargeObjBusConfig<
+        SessionAuth::Prin,
+        ChannelRegistryChannelsConfig<()>,
+        Epochs::Config,
+        Endpoint
+    >,
+    consensus_large_obj_config: LargeObjProtoConfig<
+        <ConsensusCtlCodec<u128, H, TestSeal, TestSealCodec> as Codec<
+            ConsensusCtl<u128, H::HashID, TestSeal>
+        >>::Param,
+        IDs::Config
+    >,
+    peer_state_config: PeerStateConfig,
+    client_listener: ThreadedFlowsListener<
         <Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow,
         StreamID<
             <Channel::Xfrm as DatagramXfrm>::PeerAddr,
@@ -222,27 +294,76 @@ pub struct PeerComponent<
         >,
         SessionAuth::Prin
     >,
+    processor_listener: ThreadedFlowsListener<
+        <Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow,
+        StreamID<
+            <Channel::Xfrm as DatagramXfrm>::PeerAddr,
+            F::ChannelID,
+            Channel::Param
+        >,
+        SessionAuth::Prin
+    >,
+    consensus_listener: ThreadedFlowsListener<
+        <Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow,
+        StreamID<
+            <Channel::Xfrm as DatagramXfrm>::PeerAddr,
+            F::ChannelID,
+            Channel::Param
+        >,
+        SessionAuth::Prin
+    >,
+    // XXX this should be a session principal for processors.
+    processor_ids: HashMap<XactMsgAuth::Prin, ProcessorIdx>,
+    processors: HashMap<Uuid, ProcessorEntry>,
+    consensus_authn: CtlMsgAuth,
     shutdown: ShutdownFlag,
-    ctx: Ctx
+    consensus_ctx: Ctx,
+    processors_ctx: Ctx,
+    client_ctx: Ctx
 }
 
 pub struct PeerComponentCleanup {
     shutdown: ShutdownFlag,
+    consensus_comm_cleanup: MulticastLargeObjBusCleanup,
+    processor_comm_cleanup: DispatchLargeObjBusCleanup,
     client_comm_cleanup: DispatchLargeObjBusCleanup
 }
 
-pub enum PeerComponentRunError<Acquire> {
+pub enum PeerComponentRunError<Acquire, Consensus, C> {
     ClientComm {
         err: DispatchLargeObjBusCreateError<
-            <LargeObjMsgCodec<SHA3Algo> as Codec<LargeObjMsg<SHA3ID>>>::CreateError,
+            <LargeObjMsgCodec<SHA3Algo> as
+             Codec<LargeObjMsg<SHA3ID>>>::CreateError,
             Acquire
         >
+    },
+    ProcessorComm {
+        err: DispatchLargeObjBusCreateError<
+            <LargeObjMsgCodec<SHA3Algo> as
+             Codec<LargeObjMsg<SHA3ID>>>::CreateError,
+            Acquire
+        >
+    },
+    ConsensusComm {
+        err: Consensus
+    },
+    LargeObj {
+        err: LargeObjProtoCreateError<C>
+    },
+    ClientStart {
+        err: std::io::Error
+    },
+    ProcessorStart {
+        err: std::io::Error
+    },
+    ConsensusStart {
+        err: std::io::Error
     }
 }
 
 #[cfg(feature = "standalone")]
 pub type StandaloneRegistry = CompoundFarChannelRegistry<
-    TrivialAuthN<TestCred>,
+    Arc<TestAuthN<String, TestCred>>,
     UnixDatagramXfrm,
     UDPDatagramXfrm,
     FarChannelRegistryID
@@ -262,11 +383,12 @@ pub struct StandaloneCreateCleanup {
 }
 
 impl<
-        Wrapper,
-        WrapperCodec,
+        XactWrapper,
+        XactWrapperCodec,
         H,
         IDs,
-        MsgAuth,
+        XactMsgAuth,
+        CtlMsgAuth,
         Epochs,
         Channel,
         F,
@@ -277,11 +399,12 @@ impl<
         Ctx
     >
     PeerComponent<
-        Wrapper,
-        WrapperCodec,
+        XactWrapper,
+        XactWrapperCodec,
         H,
         IDs,
-        MsgAuth,
+        XactMsgAuth,
+        CtlMsgAuth,
         Epochs,
         Channel,
         F,
@@ -292,12 +415,27 @@ impl<
         Ctx
     >
 where
-    Wrapper: 'static + Clone + Send,
-    MsgAuth: 'static
+    XactWrapper: 'static + Clone + Send,
+    XactMsgAuth: 'static
         + Clone
-        + MsgAuthN<XactBatch<H::HashID>, Wrapper, SessionPrin = SessionAuth::Prin>
+        + MsgAuthN<
+            XactBlobBatch<u128, H::HashID, TestSeal>,
+            XactWrapper,
+            SessionPrin = SessionAuth::Prin,
+            Prin = SessionAuth::Prin
+        >
         + Send,
-    MsgAuth::SessionPrin: Send + Sync,
+    XactMsgAuth::SessionPrin: Send + Sync,
+    CtlMsgAuth: 'static
+        + Clone
+        + MsgAuthN<
+            ConsensusCtl<u128, H::HashID, TestSeal>,
+            ConsensusCtl<u128, H::HashID, TestSeal>,
+            SessionPrin = SessionAuth::Prin,
+            Prin = SessionAuth::Prin
+        >
+        + Send,
+    CtlMsgAuth::SessionPrin: Send + Sync,
     IDs: 'static + Clone + IDGen + Iterator<Item = LargeObjID> + Send,
     IDs::Config: Clone,
     H: 'static + Clone + Default + HashAlgo + Send,
@@ -308,9 +446,9 @@ where
         + Send
         + Sync,
     SessionAuth::Prin: 'static + Clone + Display + Eq + Hash + Send + Sync,
-    WrapperCodec: 'static + Clone + Codec<Wrapper> + Send,
-    <WrapperCodec as Codec<Wrapper>>::Param: Default,
-    Epochs: 'static + IDGen + Iterator<Item = u128> + Send + Sync,
+    XactWrapperCodec: 'static + Clone + Codec<XactWrapper> + Send,
+    <XactWrapperCodec as Codec<XactWrapper>>::Param: Default,
+    Epochs: 'static + Default + IDGen + Iterator<Item = u128> + Send + Sync,
     Epochs::Config: Clone + Send,
     Channel: 'static
         + FarChannelOwnedFlows<F, SessionAuth, Xfrm>
@@ -382,26 +520,110 @@ where
                     >,
                     <Channel::Acquired as FarChannelAcquired>::WrapError
                 >
-            >
-         >
+            >,
+            MulticastLargeObjBusRunError<
+                FarChannelRegistryAcquireError<
+                    RegistryAcquireError<
+                        Channel::AcquireError,
+                        <Channel::Acquired as FarChannelAcquiredResolve>::ResolverError,
+                        FarChannelFlowsError<
+                            Channel::SocketError,
+                            F::CreateError,
+                            Channel::XfrmError
+                        >,
+                        <Channel::Acquired as FarChannelAcquired>::WrapError
+                    >
+                >,
+                <LargeObjMsgCodec<H> as Codec<LargeObjMsg<H::HashID>>>::CreateError,
+                StreamSelectorCreateError<
+                    FarChannelRegistryChannelsCreateError<
+                        <LargeObjMsgCodec<H> as Codec<LargeObjMsg<H::HashID>>>::CreateError
+                    >,
+                    Resolver::CreateError
+                >,
+                ThreadedStreamSelectorError<
+                    Resolver::AddrsError,
+                    FarChannelRegistryAcquireError<
+                        RegistryAcquireError<
+                            Channel::AcquireError,
+                            <Channel::Acquired as FarChannelAcquiredResolve>::ResolverError,
+                            FarChannelFlowsError<
+                                Channel::SocketError,
+                                F::CreateError,
+                                Channel::XfrmError
+                            >,
+                            <Channel::Acquired as FarChannelAcquired>::WrapError
+                        >
+                    >
+                >
+            >,
+            <ConsensusCtlCodec<u128, H, TestSeal, TestSealCodec> as Codec<
+                ConsensusCtl<u128, H::HashID, TestSeal>
+            >>::CreateError
+        >
     >{
         let PeerComponent {
+            peer_state_config,
+            consensus_large_obj_config,
+            consensus_comm_config,
+            consensus_listener,
             client_comm_config,
-            large_obj_config,
-            listener,
+            client_large_obj_config,
+            client_listener,
+            processor_comm_config,
+            processor_large_obj_config,
+            processor_listener,
+            processor_ids,
+            processors_ctx,
+            consensus_ctx,
+            consensus_authn,
+            client_ctx,
+            processors,
             shutdown,
-            ctx,
             ..
         } = self;
 
         info!(target: "peer-component",
               "starting peer component");
 
-        let client_dispatch = ClientSessionDispatch::new(large_obj_config);
+        let state = Arc::new(PeerState::new(peer_state_config, processors));
+        let processor_dispatch = ProcessorSessionDispatch::new(
+            processor_large_obj_config,
+            processor_ids,
+            state.clone()
+        );
+        let processor_comm: DispatchLargeObjBus<
+            XactBlobBatch<u128, H::HashID, TestSeal>,
+            XactBlobBatch<u128, H::HashID, TestSeal>,
+            XactBatchBlobCodec<u128, H, TestSeal, TestSealCodec>,
+            H,
+            IDs,
+            _,
+            _,
+            _,
+            Epochs,
+            _,
+            _,
+            _,
+            _,
+            Resolver,
+            Endpoint,
+            _,
+            _
+        > = DispatchLargeObjBus::create(
+            processor_comm_config,
+            processor_dispatch,
+            processor_listener,
+            shutdown.clone(),
+            processors_ctx
+        )
+        .map_err(|err| PeerComponentRunError::ProcessorComm { err: err })?;
+        let client_dispatch =
+            ClientSessionDispatch::new(client_large_obj_config, state.clone());
         let client_comm: DispatchLargeObjBus<
-            XactBatch<H::HashID>,
-            XactBatch<H::HashID>,
-            XactBatchCodec<H>,
+            XactBlobBatch<u128, H::HashID, TestSeal>,
+            XactBlobBatch<u128, H::HashID, TestSeal>,
+            XactBatchBlobCodec<u128, H, TestSeal, TestSealCodec>,
             H,
             IDs,
             _,
@@ -419,15 +641,69 @@ where
         > = DispatchLargeObjBus::create(
             client_comm_config,
             client_dispatch,
-            listener,
+            client_listener,
             shutdown.clone(),
-            ctx
+            client_ctx
         )
         .map_err(|err| PeerComponentRunError::ClientComm { err: err })?;
+        let consensus_recv = ConsensusRecv::new(state.clone());
+        let consensus_msgs = ConsensusMsgs::new(state.clone());
+        let consensus_hash = H::default();
+        let consensus_notify = state.notify();
+        let consensus_proto = LargeObjProto::create(
+            consensus_large_obj_config,
+            consensus_notify.clone(),
+            consensus_recv,
+            consensus_msgs,
+            consensus_authn,
+            consensus_hash
+        )
+        .map_err(|err| PeerComponentRunError::LargeObj { err: err })?;
+        let consensus_comm: MulticastLargeObjBus<
+            _,
+            _,
+            ConsensusCtlCodec<u128, H, TestSeal, TestSealCodec>,
+            H,
+            IDs,
+            _,
+            _,
+            _,
+            Epochs,
+            _,
+            _,
+            _,
+            _,
+            Resolver,
+            _,
+            _
+        > = MulticastLargeObjBus::create(
+            None,
+            consensus_comm_config,
+            consensus_listener,
+            consensus_ctx,
+            shutdown.clone(),
+            consensus_notify,
+            consensus_proto
+        )
+        .map_err(|err| PeerComponentRunError::ConsensusComm { err: err })?;
 
-        let client_comm_cleanup = client_comm.start();
+        let consensus_comm_cleanup = consensus_comm.start().map_err(|err| {
+            PeerComponentRunError::ConsensusStart { err: err }
+        })?;
+
+        // XXX this doesn't clean up properly if consensus uplink
+        // fails to start.
+        let processor_comm_cleanup = processor_comm.start().map_err(|err| {
+            PeerComponentRunError::ProcessorStart { err: err }
+        })?;
+
+        let client_comm_cleanup = client_comm
+            .start()
+            .map_err(|err| PeerComponentRunError::ClientStart { err: err })?;
 
         Ok(PeerComponentCleanup {
+            consensus_comm_cleanup: consensus_comm_cleanup,
+            processor_comm_cleanup: processor_comm_cleanup,
             client_comm_cleanup: client_comm_cleanup,
             shutdown: shutdown
         })
@@ -438,11 +714,15 @@ impl PeerComponentCleanup {
     pub fn cleanup(self) {
         let PeerComponentCleanup {
             client_comm_cleanup,
+            processor_comm_cleanup,
+            consensus_comm_cleanup,
             mut shutdown
         } = self;
 
         shutdown.set();
         client_comm_cleanup.cleanup();
+        processor_comm_cleanup.cleanup();
+        consensus_comm_cleanup.cleanup();
     }
 }
 
@@ -462,12 +742,12 @@ impl
     FarChannelRegistryCtx<
         CompoundFarChannel,
         CompoundFarChannelThreadedFlows<
-            TrivialAuthN<TestCred>,
+            Arc<TestAuthN<String, TestCred>>,
             UnixDatagramXfrm,
             UDPDatagramXfrm,
             FarChannelRegistryID
         >,
-        TrivialAuthN<TestCred>,
+        Arc<TestAuthN<String, TestCred>>,
         CompoundFarChannelXfrm<UnixDatagramXfrm, UDPDatagramXfrm>
     > for StandaloneCtx
 {
@@ -480,11 +760,12 @@ impl
 #[cfg(feature = "standalone")]
 impl Standalone
     for CompoundPeerComponent<
-        XactBatch<SHA3ID>,
-        XactBatchCodec<SHA3Algo>,
+        XactBlobBatch<u128, SHA3ID, TestSeal>,
+        XactBatchBlobCodec<u128, SHA3Algo, TestSeal, TestSealCodec>,
         SHA3Algo,
         AscendingCount<LargeObjID>,
-        PassthruMsgAuthN<XactBatch<SHA3ID>, TestCred>,
+        PassthruMsgAuthN<XactBlobBatch<u128, SHA3ID, TestSeal>, String>,
+        PassthruMsgAuthN<ConsensusCtl<u128, SHA3ID, TestSeal>, String>,
         AscendingCount<u128>,
         StandaloneCtx
     >
@@ -505,9 +786,30 @@ impl Standalone
         config: Self::Config
     ) -> Result<(Self, Self::CreateCleanup), Self::CreateCleanup> {
         let (name_caches_config, peer_config) = config.take();
-        let clients_config = peer_config.take();
-        let (client_registry_config, client_comm_config, large_obj_config) =
-            clients_config.take();
+        let (
+            clients_config,
+            processors_config,
+            consensus_config,
+            peer_state_config
+        ) = peer_config.take();
+        let (
+            client_registry_config,
+            client_comm_config,
+            client_large_obj_config,
+            client_auth_config
+        ) = clients_config.take();
+        let (
+            processor_registry_config,
+            processor_comm_config,
+            processor_large_obj_config,
+            classes_config,
+            processor_auth_config
+        ) = processors_config.take();
+        let (
+            consensus_registry_config,
+            consensus_comm_config,
+            consensus_large_obj_config
+        ) = consensus_config.take();
         let shutdown = ShutdownFlag::new();
         let (mut caches, caches_join) =
             ThreadedNSNameCaches::create(name_caches_config, shutdown.clone());
@@ -515,55 +817,252 @@ impl Standalone
             shutdown: shutdown.clone(),
             caches_join: caches_join
         };
-        let (listener, reporter) = ThreadedFlowsListener::new();
-        let authn = TrivialAuthN::default();
+        let (client_listener, client_reporter) = ThreadedFlowsListener::new();
+        let (processor_listener, processor_reporter) =
+            ThreadedFlowsListener::new();
+        let (consensus_listener, consensus_reporter) =
+            ThreadedFlowsListener::new();
 
-        match StandaloneRegistry::create(
-            &mut caches,
-            authn,
-            reporter,
-            client_registry_config
-        ) {
-            Ok(registry) => {
-                let ctx = StandaloneCtx {
-                    registry: Arc::new(registry),
-                    caches: caches
-                };
-                let peer = PeerComponent {
-                    wrapper: PhantomData,
-                    codec: PhantomData,
-                    hash: PhantomData,
-                    auth: PhantomData,
-                    ids: PhantomData,
-                    resolver: PhantomData,
-                    endpoint: PhantomData,
-                    client_comm_config: client_comm_config,
-                    large_obj_config: large_obj_config,
-                    shutdown: shutdown,
-                    listener: listener,
-                    ctx: ctx
-                };
+        // XXX maybe move this part into state?
+        let ProcessorClassesConfig::Static {
+            stat: processor_configs
+        } = classes_config;
+        let mut processor_ids: HashMap<String, ProcessorIdx> =
+            HashMap::with_capacity(processor_configs.len());
+        let mut classes = HashMap::with_capacity(processor_configs.len());
+        let mut curr_id = 0;
 
-                Ok((peer, cleanup))
-            }
-            Err(err) => {
-                error!(target: "start",
-                       "error creating channel registry: {}",
-                       err);
+        // Build the configuration structure for processors.
+        for processor_config in processor_configs {
+            let (prin, class_configs) = processor_config.take();
+            let id = match processor_ids.get(&prin) {
+                Some(id) => id.clone(),
+                None => {
+                    let idx = ProcessorIdx::from(curr_id);
 
-                Err(cleanup)
+                    curr_id += 1;
+                    processor_ids.insert(prin, idx.clone());
+
+                    idx
+                }
+            };
+
+            for class_config in class_configs {
+                let (class, instances, versions) = class_config.take();
+                let versions = versions.into_iter().map(|config| config.into());
+                let class: Uuid = class.into();
+                let instance = InstanceEntry::new(id.clone(), versions);
+
+                match classes.entry(class) {
+                    Entry::Vacant(ent) => {
+                        let ent = ent.insert(HashMap::new());
+
+                        for i in instances {
+                            ent.insert(i as u64, instance.clone());
+                        }
+                    }
+                    Entry::Occupied(mut ent) => {
+                        for i in instances {
+                            if ent
+                                .get_mut()
+                                .insert(i as u64, instance.clone())
+                                .is_some()
+                            {
+                                error!(target: "start",
+                                       concat!("duplicate processor: ",
+                                               "class {}, instance {}"),
+                                       class, i);
+
+                                return Err(cleanup);
+                            }
+                        }
+                    }
+                }
             }
         }
+
+        // XXX this is brought over from consensus, and should be
+        // turned into a general function.
+        let parties_config = consensus_comm_config.parties();
+        let authn_parties = match parties_config {
+            PartiesConfig::Static { stat } => {
+                let mut authn_parties = Vec::with_capacity(stat.len());
+
+                for party in stat {
+                    let id = party.party();
+
+                    for conn in party.party_config().connections() {
+                        for endpoint in conn.endpoints() {
+                            match endpoint {
+                                CompoundFarEndpoint::Unix { unix_datagram } => {
+                                    match UnixSocketAddr::try_from(
+                                        unix_datagram
+                                    ) {
+                                        Ok(addr) => {
+                                            let cred =
+                                                TestCred::Unix { addr: addr };
+
+                                            authn_parties
+                                                .push((cred, id.clone()));
+                                        }
+                                        Err(err) => {
+                                            warn!(target: "start",
+                                              "error converting path: {}",
+                                              err);
+                                        }
+                                    }
+                                }
+                                CompoundFarEndpoint::UDP { udp } => match udp
+                                    .ip_endpoint()
+                                {
+                                    IPEndpointAddr::Addr(addr) => {
+                                        let addr =
+                                            SocketAddr::new(*addr, udp.port());
+                                        let cred = TestCred::IP { addr: addr };
+
+                                        authn_parties.push((cred, id.clone()));
+                                    }
+                                    IPEndpointAddr::Name(name) => {
+                                        warn!(target: "start",
+                                               "discarding endpoint {}",
+                                               name);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                authn_parties
+            }
+        };
+        let consensus_authn =
+            Arc::new(TestAuthN::from_parties(authn_parties.into_iter()));
+        let processors = classes
+            .into_iter()
+            .map(|(class, mut instances)| {
+                instances.shrink_to_fit();
+
+                (class, ProcessorEntry::new(instances))
+            })
+            .collect();
+        let processors_authn = match TestAuthN::create(processor_auth_config) {
+            Ok(processor_authn) => processor_authn,
+            Err(err) => {
+                error!(target: "start",
+                       "error creating processor authn: {}",
+                       err);
+
+                return Err(cleanup);
+            }
+        };
+        let processors_authn = Arc::new(processors_authn);
+        let processors_ctx = match StandaloneRegistry::create(
+            &mut caches,
+            processors_authn,
+            processor_reporter,
+            processor_registry_config
+        ) {
+            Ok(processor_registry) => StandaloneCtx {
+                registry: Arc::new(processor_registry),
+                caches: caches.clone()
+            },
+            Err(err) => {
+                error!(target: "start",
+                       "error creating processor channel registry: {}",
+                       err);
+
+                return Err(cleanup);
+            }
+        };
+        let client_authn = match TestAuthN::create(client_auth_config) {
+            Ok(processor_authn) => processor_authn,
+            Err(err) => {
+                error!(target: "start",
+                       "error creating processor authn: {}",
+                       err);
+
+                return Err(cleanup);
+            }
+        };
+        let client_authn = Arc::new(client_authn);
+        let client_ctx = match StandaloneRegistry::create(
+            &mut caches,
+            client_authn,
+            client_reporter,
+            client_registry_config
+        ) {
+            Ok(client_registry) => StandaloneCtx {
+                registry: Arc::new(client_registry),
+                caches: caches.clone()
+            },
+            Err(err) => {
+                error!(target: "start",
+                       "error creating client channel registry: {}",
+                       err);
+
+                return Err(cleanup);
+            }
+        };
+        let consensus_ctx = match StandaloneRegistry::create(
+            &mut caches,
+            consensus_authn,
+            consensus_reporter,
+            consensus_registry_config
+        ) {
+            Ok(consensus_registry) => StandaloneCtx {
+                registry: Arc::new(consensus_registry),
+                caches: caches
+            },
+            Err(err) => {
+                error!(target: "start",
+                       "error creating consensus channel registry: {}",
+                       err);
+
+                return Err(cleanup);
+            }
+        };
+        let consensus_authn = PassthruMsgAuthN::default();
+        let peer = PeerComponent {
+            xact_wrapper: PhantomData,
+            xact_codec: PhantomData,
+            hash: PhantomData,
+            xact_auth: PhantomData,
+            ctl_auth: PhantomData,
+            ids: PhantomData,
+            resolver: PhantomData,
+            endpoint: PhantomData,
+            processor_comm_config: processor_comm_config,
+            processor_large_obj_config: processor_large_obj_config,
+            processor_listener: processor_listener,
+            peer_state_config: peer_state_config,
+            client_comm_config: client_comm_config,
+            client_large_obj_config: client_large_obj_config,
+            client_listener: client_listener,
+            consensus_listener: consensus_listener,
+            consensus_large_obj_config: consensus_large_obj_config,
+            consensus_comm_config: consensus_comm_config,
+            processors: processors,
+            processor_ids: processor_ids,
+            processors_ctx: processors_ctx,
+            consensus_ctx: consensus_ctx,
+            client_ctx: client_ctx,
+            shutdown: shutdown,
+            consensus_authn: consensus_authn
+        };
+
+        Ok((peer, cleanup))
     }
 }
 
 impl StandaloneService
     for CompoundPeerComponent<
-        XactBatch<SHA3ID>,
-        XactBatchCodec<SHA3Algo>,
+        XactBlobBatch<u128, SHA3ID, TestSeal>,
+        XactBatchBlobCodec<u128, SHA3Algo, TestSeal, TestSealCodec>,
         SHA3Algo,
         AscendingCount<LargeObjID>,
-        PassthruMsgAuthN<XactBatch<SHA3ID>, TestCred>,
+        PassthruMsgAuthN<XactBlobBatch<u128, SHA3ID, TestSeal>, String>,
+        PassthruMsgAuthN<ConsensusCtl<u128, SHA3ID, TestSeal>, String>,
         AscendingCount<u128>,
         StandaloneCtx
     >
@@ -624,9 +1123,12 @@ impl StandaloneService
     }
 }
 
-impl<Acquire> Display for PeerComponentRunError<Acquire>
+impl<Acquire, Consensus, C> Display
+    for PeerComponentRunError<Acquire, Consensus, C>
 where
-    Acquire: Display
+    Acquire: Display,
+    Consensus: Display,
+    C: Display
 {
     fn fmt(
         &self,
@@ -638,6 +1140,7 @@ where
 
 // ISSUE #2: Delete from here
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 
 use constellation_auth::cred::SSLCred;
@@ -646,10 +1149,69 @@ use constellation_channels::far::compound::CompoundFarChannelXfrmPeerAddr;
 use constellation_channels::far::compound::CompoundFarIPChannelXfrmPeerAddr;
 use constellation_channels::unix::UnixSocketAddr;
 
+#[derive(Clone, Debug)]
+pub struct TestSeal;
+
+#[derive(Clone)]
+pub struct TestSealCodec;
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum TestCred {
     IP { addr: SocketAddr },
     Unix { addr: UnixSocketAddr }
+}
+
+impl TryFrom<TestCredConfig> for TestCred {
+    type Error = std::io::Error;
+
+    #[inline]
+    fn try_from(val: TestCredConfig) -> Result<TestCred, Self::Error> {
+        match val {
+            TestCredConfig::Unix { unix } => {
+                let addr = UnixSocketAddr::try_from(unix)?;
+
+                Ok(TestCred::Unix { addr: addr })
+            }
+            TestCredConfig::IP { ip } => Ok(TestCred::IP { addr: ip })
+        }
+    }
+}
+
+impl Codec<TestSeal> for TestSealCodec {
+    type CreateError = Infallible;
+    type DecodeError = Infallible;
+    type EncodeError = Infallible;
+    type Param = ();
+
+    #[inline]
+    fn create(_param: ()) -> Result<Self, Infallible> {
+        Ok(TestSealCodec)
+    }
+
+    #[inline]
+    fn buf_size(
+        &self,
+        _val: &TestSeal
+    ) -> usize {
+        0
+    }
+
+    #[inline]
+    fn encode(
+        &mut self,
+        _val: &TestSeal,
+        _buf: &mut [u8]
+    ) -> Result<usize, Self::EncodeError> {
+        Ok(0)
+    }
+
+    #[inline]
+    fn decode(
+        &mut self,
+        _buf: &[u8]
+    ) -> Result<(TestSeal, usize), Self::DecodeError> {
+        Ok((TestSeal, 0))
+    }
 }
 
 impl<Basic> From<SSLCred<CompoundFarChannelSessionCred<Basic>>> for TestCred
@@ -682,6 +1244,7 @@ impl From<CompoundFarChannelXfrmPeerAddr> for TestCred {
         }
     }
 }
+
 impl<Basic> From<CompoundFarChannelSessionCred<Basic>> for TestCred
 where
     TestCred: From<Basic>

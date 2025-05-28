@@ -18,7 +18,6 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
@@ -42,6 +41,7 @@ use constellation_common::sync::Notify;
 use constellation_component_common::bus::large_obj::dispatch::SessionDispatch;
 use constellation_component_common::xact::XactBatchBlobCodec;
 use constellation_component_common::xact::XactBlobBatch;
+use constellation_component_common::xact::XactNotifyState;
 use constellation_streams::config::LargeObjProtoConfig;
 use constellation_streams::frags::Frags;
 use constellation_streams::frags::OutboundFrags;
@@ -56,8 +56,9 @@ use log::trace;
 use log::warn;
 
 use crate::state::PeerState;
+use crate::state::ProcessorIdx;
 
-pub(crate) struct ClientSessionDispatch<H, IDs, Prin, Seal, SealCodec>
+pub(crate) struct ProcessorSessionDispatch<H, IDs, Prin, Seal, SealCodec>
 where
     SealCodec: Clone + Codec<Seal>,
     SealCodec::Param: Clone + Default,
@@ -69,65 +70,65 @@ where
     Prin: Clone + Display + Eq + Hash + Send + Sync {
     hash: PhantomData<H>,
     ids: PhantomData<IDs>,
-    sessions: Arc<Mutex<HashMap<Prin, ClientSession<H::HashID>>>>,
+    sessions: Arc<Mutex<HashMap<Prin, ProcessorSession>>>,
     state: Arc<PeerState<H::HashID, Prin, Seal>>,
     config: LargeObjProtoConfig<
         <XactBatchBlobCodec<u128, H, Seal, SealCodec> as Codec<
             XactBlobBatch<u128, H::HashID, Seal>
         >>::Param,
         IDs::Config
-    >
+    >,
+    processors: HashMap<Prin, ProcessorIdx>
 }
 
 #[derive(Clone)]
-pub(crate) struct ClientSessionRecv<H, Prin, Seal>
+pub(crate) struct ProcessorSessionRecv<H, Prin, Seal>
 where
     H: Clone + Display + Hash + HashID + Eq + Send,
     Prin: Clone + Display + Eq + Hash + Send + Sync,
     Seal: Clone {
     hash: PhantomData<H>,
     state: Arc<PeerState<H, Prin, Seal>>,
-    sessions: Arc<Mutex<HashMap<Prin, ClientSession<H>>>>
+    sessions: Arc<Mutex<HashMap<Prin, ProcessorSession>>>
 }
 
 #[derive(Clone)]
-pub(crate) struct ClientSessionMsgs<H, Prin, Seal>
+pub(crate) struct ProcessorSessionMsgs<H, Prin, Seal>
 where
     Prin: Clone + Display + Eq + Hash + Send + Sync,
     H: HashAlgo,
     H::HashID: Clone + Display + Eq + Hash + HashID,
     Seal: Clone {
     state: Arc<PeerState<H::HashID, Prin, Seal>>,
-    subscriptions: Arc<Mutex<HashSet<H::HashID>>>,
-    prin: Prin
+    idx: ProcessorIdx
 }
 
-struct ClientSession<H>
-where
-    H: Clone + Display + Hash + HashID + Eq + Send {
-    subscriptions: Arc<Mutex<HashSet<H>>>,
+struct ProcessorSession {
     local_shutdown: ShutdownFlag
 }
 
 #[derive(Debug)]
-pub(crate) enum ClientSessionDispatchError<Prin, Codec> {
+pub(crate) enum ProcessorSessionDispatchError<Prin, Codec> {
     Proto {
         err: LargeObjProtoCreateError<Codec>
     },
     Exists {
         prin: Prin
     },
+    Unknown {
+        prin: Prin
+    },
     MutexPoison
 }
 
 #[derive(Debug)]
-pub(crate) enum ClientSessionRecvError<Prin> {
+pub(crate) enum ProcessorSessionRecvError<Prin> {
     NotFound { prin: Prin },
     MutexPoison
 }
 
 unsafe impl<H, IDs, Prin, Seal, SealCodec> Send
-    for ClientSessionDispatch<H, IDs, Prin, Seal, SealCodec>
+    for ProcessorSessionDispatch<H, IDs, Prin, Seal, SealCodec>
 where
     SealCodec: Clone + Codec<Seal>,
     SealCodec::Param: Clone + Default,
@@ -141,7 +142,7 @@ where
 }
 
 unsafe impl<H, IDs, Prin, Seal, SealCodec> Sync
-    for ClientSessionDispatch<H, IDs, Prin, Seal, SealCodec>
+    for ProcessorSessionDispatch<H, IDs, Prin, Seal, SealCodec>
 where
     SealCodec: Clone + Codec<Seal>,
     SealCodec::Param: Clone + Default,
@@ -154,7 +155,7 @@ where
 {
 }
 
-unsafe impl<H, Prin, Seal> Send for ClientSessionRecv<H, Prin, Seal>
+unsafe impl<H, Prin, Seal> Send for ProcessorSessionRecv<H, Prin, Seal>
 where
     H: Clone + Display + Hash + HashID + Eq + Send,
     Prin: Clone + Display + Eq + Hash + Send + Sync,
@@ -162,7 +163,7 @@ where
 {
 }
 
-unsafe impl<H, Prin, Seal> Sync for ClientSessionRecv<H, Prin, Seal>
+unsafe impl<H, Prin, Seal> Sync for ProcessorSessionRecv<H, Prin, Seal>
 where
     H: Clone + Display + Hash + HashID + Eq + Send,
     Prin: Clone + Display + Eq + Hash + Send + Sync,
@@ -171,7 +172,7 @@ where
 }
 
 impl<H, Prin, Seal> LargeObjMsgs<H, XactBlobBatch<u128, H::HashID, Seal>>
-    for ClientSessionMsgs<H, Prin, Seal>
+    for ProcessorSessionMsgs<H, Prin, Seal>
 where
     Prin: Clone + Display + Eq + Hash + Send + Sync,
     H: Clone + HashAlgo,
@@ -196,16 +197,11 @@ where
         WrapperCodec: Clone + Codec<XactBlobBatch<u128, H::HashID, Seal>>,
         WrapperCodec::Param: Default,
         F: Frags {
-        let prin = self.prin.clone();
-        let mut subscriptions = self
-            .subscriptions
-            .lock()
-            .map_err(|_| WithMutexPoison::MutexPoison)?;
-        let (notifies, next) =
-            self.state.get_client_msgs(&mut subscriptions, &prin)?;
+        let (committed, reqs, next) =
+            self.state.get_processor_msgs(self.idx.clone())?;
 
-        if !notifies.is_empty() {
-            let batch = XactBlobBatch::new(vec![], vec![], notifies);
+        if !committed.is_empty() || !reqs.is_empty() {
+            let batch = XactBlobBatch::new(committed, reqs, vec![]);
 
             sender
                 .add_outbound(&batch)
@@ -218,21 +214,18 @@ where
     }
 }
 
-impl<Prin> ScopedError for ClientSessionRecvError<Prin> {
+impl<Prin> ScopedError for ProcessorSessionRecvError<Prin> {
     fn scope(&self) -> ErrorScope {
         match self {
-            ClientSessionRecvError::NotFound { .. } => ErrorScope::Session,
-            ClientSessionRecvError::MutexPoison => ErrorScope::Unrecoverable
+            ProcessorSessionRecvError::NotFound { .. } => ErrorScope::Session,
+            ProcessorSessionRecvError::MutexPoison => ErrorScope::Unrecoverable
         }
     }
 }
 
-impl<H> Drop for ClientSession<H>
-where
-    H: Clone + Display + Hash + HashID + Eq + Send
-{
+impl Drop for ProcessorSession {
     fn drop(&mut self) {
-        trace!(target: "client-session",
+        trace!(target: "processor-session",
                "signaling local shutdown");
 
         self.local_shutdown.set()
@@ -240,14 +233,14 @@ where
 }
 
 impl<Prin, H, Seal> AuthNMsgRecv<Prin, XactBlobBatch<u128, H, Seal>>
-    for ClientSessionRecv<H, Prin, Seal>
+    for ProcessorSessionRecv<H, Prin, Seal>
 where
     H: Clone + Display + Hash + HashID + Eq + Send,
     Prin: Clone + Display + Eq + Hash + Send + Sync,
     Seal: Clone
 {
     /// Errors that can occur reporting messages.
-    type RecvError = ClientSessionRecvError<Prin>;
+    type RecvError = ProcessorSessionRecvError<Prin>;
 
     /// Receive an authenticated message.
     fn recv_auth_msg(
@@ -255,59 +248,89 @@ where
         prin: &Prin,
         msg: XactBlobBatch<u128, H, Seal>
     ) -> Result<(), Self::RecvError> {
-        debug!(target: "client-session-recv",
+        debug!(target: "processor-session-recv",
                "received batch from {}",
                prin);
 
         let mut sessions = self
             .sessions
             .lock()
-            .map_err(|_| ClientSessionRecvError::MutexPoison)?;
+            .map_err(|_| ProcessorSessionRecvError::MutexPoison)?;
         // This is a placeholder for eventual authorization.
-        let session = sessions
-            .get_mut(prin)
-            .ok_or(ClientSessionRecvError::NotFound { prin: prin.clone() })?;
+        let _ = sessions.get_mut(prin).ok_or(
+            ProcessorSessionRecvError::NotFound { prin: prin.clone() }
+        )?;
         let (committed, reqs, notifies) = msg.take();
 
-        for req in reqs.into_iter() {
-            trace!(target: "client-session-recv",
-                   "processing uncommitted request from {}",
-                   prin);
-
-            // XXX will need to authorize the seal here.
-            let (seal, req) = req.take();
-            let (class, version, instance, hash, effects, payload) = req.take();
-
-            session
-                .subscriptions
-                .lock()
-                .map_err(|_| ClientSessionRecvError::MutexPoison)?
-                .insert(hash.clone());
-            self.state
-                .add_xact(
-                    prin, class, version, instance, hash, effects, payload,
-                    seal
-                )
-                .map_err(|_| ClientSessionRecvError::MutexPoison)?;
+        // We shouldn't be getting these at all at this point.  We
+        // will eventually get them in the form of derived
+        // transactions, though.
+        for _ in reqs.into_iter() {
+            warn!(target: "processor-session-recv",
+                  "discarding unauthorized uncommitted request message");
         }
 
-        // We shouldn't be getting these at all at this point.  They
-        // might make sense at some point as a forwarding mechanism,
-        // and with consensus seals, it's not entirely unreasonable to
-        // do that.
-
+        // We shouldn't be getting these at all.
         for _ in committed.into_iter() {
-            warn!(target: "client-session-recv",
+            warn!(target: "processor-session-recv",
                   "discarding unauthorized committed round message");
         }
 
         // These might make sense as a forwarding mechanism, but
         // unlikely.
-
         for notify in notifies.into_iter() {
-            warn!(target: "client-session-recv",
-                  "discarding notify for {}",
-                  notify.hash())
+            trace!(target: "processor-session-recv",
+                   "processing notify from {}",
+                   prin);
+
+            // XXX will need to authorize the seal here.
+            let (hash, notify) = notify.take();
+
+            match notify {
+                // This is fine, and will probably be meaningful at
+                // some point.
+                XactNotifyState::Accept => {
+                    trace!(target: "processor-session-recv",
+                           "received accept from processor");
+                }
+                XactNotifyState::PrecommitDispatch { .. } => {
+                    warn!(target: "processor-session-recv",
+                          "unexpected precommit dispatch notification");
+                }
+                XactNotifyState::Consensus => {
+                    warn!(target: "processor-session-recv",
+                          "unexpected consensus notification");
+                }
+                XactNotifyState::Commit { .. } => {
+                    warn!(target: "processor-session-recv",
+                          "unexpected commit notification");
+                }
+                XactNotifyState::Dispatch { .. } => {
+                    warn!(target: "processor-session-recv",
+                          "unexpected dispatch notification");
+                }
+                XactNotifyState::Success { result: None, .. } => {
+                    warn!(target: "processor-session-recv",
+                          "unexpected empty success notification");
+                }
+                XactNotifyState::Error { error: None } => {
+                    warn!(target: "processor-session-recv",
+                          "unexpected empty error notification");
+                }
+                XactNotifyState::Success {
+                    result: Some(result),
+                    when
+                } => {
+                    self.state
+                        .add_result(hash, when, result)
+                        .map_err(|_| ProcessorSessionRecvError::MutexPoison)?;
+                }
+                XactNotifyState::Error { error: Some(error) } => {
+                    self.state
+                        .add_error(hash, error)
+                        .map_err(|_| ProcessorSessionRecvError::MutexPoison)?;
+                }
+            }
         }
 
         Ok(())
@@ -315,7 +338,7 @@ where
 }
 
 impl<H, IDs, Prin, Seal, SealCodec>
-    ClientSessionDispatch<H, IDs, Prin, Seal, SealCodec>
+    ProcessorSessionDispatch<H, IDs, Prin, Seal, SealCodec>
 where
     SealCodec: Clone + Codec<Seal>,
     SealCodec::Param: Clone + Default,
@@ -333,13 +356,15 @@ where
             >>::Param,
             IDs::Config
         >,
+        processors: HashMap<Prin, ProcessorIdx>,
         state: Arc<PeerState<H::HashID, Prin, Seal>>
     ) -> Self {
         let sessions = Arc::new(Mutex::new(HashMap::new()));
 
-        ClientSessionDispatch {
+        ProcessorSessionDispatch {
             hash: PhantomData,
             ids: PhantomData,
+            processors: processors,
             sessions: sessions,
             config: config,
             state: state
@@ -355,10 +380,10 @@ impl<H, IDs, Prin, Seal, SealCodec>
         PassthruMsgAuthN<XactBlobBatch<u128, H::HashID, Seal>, Prin>,
         XactBatchBlobCodec<u128, H, Seal, SealCodec>,
         IDs,
-        ClientSessionMsgs<H, Prin, Seal>,
-        ClientSessionRecv<H::HashID, Prin, Seal>,
+        ProcessorSessionMsgs<H, Prin, Seal>,
+        ProcessorSessionRecv<H::HashID, Prin, Seal>,
         Prin
-    > for ClientSessionDispatch<H, IDs, Prin, Seal, SealCodec>
+    > for ProcessorSessionDispatch<H, IDs, Prin, Seal, SealCodec>
 where
     H: Clone + Default + HashAlgo + Send,
     H::HashID: Clone + Display + Hash + HashID + Eq + Send,
@@ -369,7 +394,7 @@ where
     SealCodec: Clone + Codec<Seal>,
     SealCodec::Param: Clone + Default
 {
-    type SessionError = ClientSessionDispatchError<
+    type SessionError = ProcessorSessionDispatchError<
         Prin,
         <XactBatchBlobCodec<u128, H, Seal, SealCodec> as Codec<
             XactBlobBatch<u128, H::HashID, Seal>
@@ -391,64 +416,65 @@ where
                 (),
                 XactBatchBlobCodec<u128, H, Seal, SealCodec>,
                 IDs,
-                ClientSessionMsgs<H, Prin, Seal>,
-                ClientSessionRecv<H::HashID, Prin, Seal>,
+                ProcessorSessionMsgs<H, Prin, Seal>,
+                ProcessorSessionRecv<H::HashID, Prin, Seal>,
                 OutboundFrags
             >
         ),
         Self::SessionError
     > {
-        let mut sessions = self
-            .sessions
-            .lock()
-            .map_err(|_| ClientSessionDispatchError::MutexPoison)?;
-        let (local_shutdown, subscriptions) = match sessions.entry(prin.clone())
-        {
-            Entry::Vacant(ent) => {
-                let local_shutdown = ShutdownFlag::new();
-                // XXX use a size hint here.
-                let subscriptions = Arc::new(Mutex::new(HashSet::new()));
+        if let Some(idx) = self.processors.get(&prin) {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| ProcessorSessionDispatchError::MutexPoison)?;
+            let local_shutdown = match sessions.entry(prin.clone()) {
+                Entry::Vacant(ent) => {
+                    let local_shutdown = ShutdownFlag::new();
 
-                debug!(target: "client-session-dispatch",
-                       "creating session for {}",
-                       prin);
+                    debug!(target: "processor-session-dispatch",
+                           "creating session for {}",
+                           prin);
 
-                ent.insert(ClientSession {
-                    local_shutdown: local_shutdown.clone(),
-                    subscriptions: subscriptions.clone()
-                });
+                    ent.insert(ProcessorSession {
+                        local_shutdown: local_shutdown.clone()
+                    });
 
-                Ok((local_shutdown, subscriptions))
-            }
-            _ => Err(ClientSessionDispatchError::Exists { prin: prin.clone() })
-        }?;
-        let hash = H::default();
-        let recv = ClientSessionRecv {
-            hash: PhantomData,
-            sessions: self.sessions.clone(),
-            state: self.state.clone()
-        };
-        let msgs = ClientSessionMsgs {
-            subscriptions: subscriptions,
-            state: self.state.clone(),
-            prin: prin
-        };
-        let authn = PassthruMsgAuthN::default();
-        let proto = LargeObjProto::create(
-            self.config.clone(),
-            self.state.notify(),
-            recv,
-            msgs,
-            authn,
-            hash
-        )
-        .map_err(|err| ClientSessionDispatchError::Proto { err: err })?;
+                    Ok(local_shutdown)
+                }
+                _ => Err(ProcessorSessionDispatchError::Exists {
+                    prin: prin.clone()
+                })
+            }?;
+            let hash = H::default();
+            let recv = ProcessorSessionRecv {
+                hash: PhantomData,
+                sessions: self.sessions.clone(),
+                state: self.state.clone()
+            };
+            let msgs = ProcessorSessionMsgs {
+                state: self.state.clone(),
+                idx: idx.clone()
+            };
+            let authn = PassthruMsgAuthN::default();
+            let proto = LargeObjProto::create(
+                self.config.clone(),
+                self.state.notify(),
+                recv,
+                msgs,
+                authn,
+                hash
+            )
+            .map_err(|err| ProcessorSessionDispatchError::Proto { err: err })?;
 
-        Ok((local_shutdown, self.state.notify(), proto))
+            Ok((local_shutdown, self.state.notify(), proto))
+        } else {
+            Err(ProcessorSessionDispatchError::Unknown { prin: prin })
+        }
     }
 }
 
-impl<Prin, Codec> Display for ClientSessionDispatchError<Prin, Codec>
+impl<Prin, Codec> Display for ProcessorSessionDispatchError<Prin, Codec>
 where
     Prin: Display,
     Codec: Display
@@ -459,18 +485,21 @@ where
         f: &mut Formatter<'_>
     ) -> Result<(), Error> {
         match self {
-            ClientSessionDispatchError::Proto { err } => err.fmt(f),
-            ClientSessionDispatchError::Exists { prin } => {
-                write!(f, "client session already exists for {}", prin)
+            ProcessorSessionDispatchError::Proto { err } => err.fmt(f),
+            ProcessorSessionDispatchError::Unknown { prin } => {
+                write!(f, "no processor associated with {}", prin)
             }
-            ClientSessionDispatchError::MutexPoison => {
+            ProcessorSessionDispatchError::Exists { prin } => {
+                write!(f, "processor session already exists for {}", prin)
+            }
+            ProcessorSessionDispatchError::MutexPoison => {
                 write!(f, "mutex poisoned")
             }
         }
     }
 }
 
-impl<Prin> Display for ClientSessionRecvError<Prin>
+impl<Prin> Display for ProcessorSessionRecvError<Prin>
 where
     Prin: Display
 {
@@ -480,10 +509,12 @@ where
         f: &mut Formatter<'_>
     ) -> Result<(), Error> {
         match self {
-            ClientSessionRecvError::NotFound { prin } => {
-                write!(f, "no client session exists for {}", prin)
+            ProcessorSessionRecvError::NotFound { prin } => {
+                write!(f, "no processor session exists for {}", prin)
             }
-            ClientSessionRecvError::MutexPoison => write!(f, "mutex poisoned")
+            ProcessorSessionRecvError::MutexPoison => {
+                write!(f, "mutex poisoned")
+            }
         }
     }
 }
