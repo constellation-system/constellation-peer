@@ -179,7 +179,7 @@ where
     Seal: Clone
 {
     type AddMsgsError<Encode>
-        = WithMutexPoison<LargeObjProtoAddOutboundError<H::HashID, Encode>>
+        = WithMutexPoison<LargeObjProtoAddOutboundError<Encode>>
     where
         Encode: Display + ScopedError;
 
