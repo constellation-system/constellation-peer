@@ -135,7 +135,7 @@ where
         msg: ConsensusCtl<u128, H, Seal>
     ) -> Result<(), Self::RecvError> {
         if let ConsensusCtl::Round(round) = msg {
-            debug!(target: "processor-session-recv",
+            debug!(target: "consensus-session-recv",
                    "received consensus round from {}",
                    prin);
 
@@ -149,7 +149,7 @@ where
                 .add_consensus_seal(round, seal)
                 .map_err(|_| MutexPoison)?;
         } else {
-            warn!(target: "processor-session-recv",
+            warn!(target: "consensus-session-recv",
                    "unexpected consensus submit from {}",
                    prin);
         }
