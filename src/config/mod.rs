@@ -85,7 +85,9 @@ pub struct PeerStateConfig {
     #[serde(default)]
     seals_size_hint: Option<usize>,
     #[serde(default = "PeerStateConfig::default_retry")]
-    retry: Retry
+    retry: Retry,
+    #[serde(default = "PeerStateConfig::default_resubmit")]
+    resubmit: Retry
 }
 
 #[derive(
@@ -249,7 +251,8 @@ impl Default for PeerStateConfig {
             tombstone_duration: PeerStateConfig::default_tombstone_duration(),
             transactions_size_hint: None,
             seals_size_hint: None,
-            retry: PeerStateConfig::default_retry()
+            retry: PeerStateConfig::default_retry(),
+            resubmit: PeerStateConfig::default_resubmit()
         }
     }
 }
@@ -260,12 +263,14 @@ impl PeerStateConfig {
         tombstone_duration: Duration,
         transactions_size_hint: Option<usize>,
         seals_size_hint: Option<usize>,
-        retry: Retry
+        retry: Retry,
+        resubmit: Retry
     ) -> Self {
         PeerStateConfig {
             tombstone_duration: tombstone_duration,
             transactions_size_hint: transactions_size_hint,
             seals_size_hint: seals_size_hint,
+            resubmit: resubmit,
             retry: retry
         }
     }
@@ -286,12 +291,20 @@ impl PeerStateConfig {
     }
 
     #[inline]
-    pub fn take(self) -> (Duration, Option<usize>, Option<usize>, Retry) {
+    pub fn default_resubmit() -> Retry {
+        Retry::TERRESTRIAL_LARGE_OBJ_RESUB_DEFAULT.clone()
+    }
+
+    #[inline]
+    pub fn take(
+        self
+    ) -> (Duration, Option<usize>, Option<usize>, Retry, Retry) {
         (
             self.tombstone_duration,
             self.transactions_size_hint,
             self.seals_size_hint,
-            self.retry
+            self.retry,
+            self.resubmit
         )
     }
 }

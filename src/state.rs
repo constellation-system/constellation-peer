@@ -62,13 +62,18 @@ pub struct ProcessorIdx(usize);
 enum PendingXactStage {
     /// Pre-commit phase.
     PreCommit {
-        // XXX this will need retry information for sending to processors.
         /// Whether or not the transaction has been dispatched to a
         /// processor.
-        dispatched: bool
+        dispatched: bool,
+        when: Option<Instant>,
+        nretries: usize
     },
     /// Submitted to consensus.
-    Commit { submitted: bool },
+    Commit {
+        submitted: bool,
+        when: Option<Instant>,
+        nretries: usize
+    },
     /// Post-commit, submitted for processing.
     Process {
         dispatched: bool,
@@ -159,7 +164,7 @@ pub struct ProcessorEntry {
 #[derive(Clone)]
 struct ConsensusSealRetry {
     nretries: usize,
-    when: Instant
+    when: Option<Instant>
 }
 
 struct ConsensusSealEntry<H, Seal>
@@ -192,6 +197,8 @@ where
     missing: Mutex<HashMap<H, u128>>,
     /// Retry configuration.
     retry: Retry,
+    /// Resubmission configuration.
+    resubmit: Retry,
     /// Notification for changes.
     notify: Notify
 }
@@ -322,14 +329,18 @@ where
                         )
                     }
                 },
-                PendingXactStage::Commit { submitted: false } => {
+                PendingXactStage::Commit {
+                    submitted: false, ..
+                } => {
                     trace!(target: "peer-state",
                            "generating accept message for {}",
                            hash);
 
                     (XactNotifyState::Accept, false)
                 }
-                PendingXactStage::Commit { submitted: true } => {
+                PendingXactStage::Commit {
+                    submitted: true, ..
+                } => {
                     trace!(target: "peer-state",
                            "generating consensus message for {}",
                            hash);
@@ -338,7 +349,8 @@ where
                 }
                 PendingXactStage::Process {
                     dispatched: false,
-                    lin_point
+                    lin_point,
+                    ..
                 } => {
                     trace!(target: "peer-state",
                            "generating commit message for {}",
@@ -353,7 +365,8 @@ where
                 }
                 PendingXactStage::Process {
                     dispatched: true,
-                    lin_point
+                    lin_point,
+                    ..
                 } => {
                     trace!(target: "peer-state",
                            "generating dispatch message for {}",
@@ -433,12 +446,13 @@ where
         hash: &H,
         now: Instant,
         client: &Prin,
+        resubmit: &Retry,
         notifies: &mut Vec<XactNotify<u128, H, Vec<u8>, Vec<u8>>>
     ) -> (DeleteAction, Option<Instant>)
     where
         H: Clone + Display + HashID {
         trace!(target: "peer-state",
-               "generating client message for transactions {}",
+               "generating client message for transaction {}",
                hash);
 
         if let Some(report) = self.reporting.get_mut(client) {
@@ -447,9 +461,10 @@ where
                    client);
 
             if let Some(when) = report.when {
-                // XXX manage retry state correctly.  We don't yet
-                // have acknowledgements worked out here.
-                report.when = None;
+                let delay = resubmit.retry_delay(report.nretries);
+
+                report.when = Some(now + delay);
+                report.nretries += 1;
 
                 let next = report.when;
                 let expire = if when <= now {
@@ -487,6 +502,117 @@ where
     }
 }
 
+impl<H, Seal> ConsensusSealEntry<H, Seal>
+where
+    H: Clone + Display + Eq + Hash + HashID,
+    Seal: Clone
+{
+    fn get_processor_reqs<Prin, Round>(
+        &mut self,
+        xacts: &mut HashMap<H, PeerXact<Prin, Seal>>,
+        target: &ProcessorIdx,
+        round: Round
+    ) -> Result<Option<Vec<XactCommittedReq<Vec<u8>, Vec<u8>>>>, MutexPoison>
+    where
+        Prin: Clone + Display + Eq + Hash + Send + Sync,
+        Round: Display {
+        let mask = !self.completed.clone() & &self.known;
+
+        if mask.any() {
+            let hashes = &self.seal.hashes();
+            // There are transactions we can submit.
+            let mut reqs = Vec::with_capacity(mask.count_ones());
+
+            for i in mask.iter_ones() {
+                let hash = &hashes[i];
+
+                if let Some(xact) = xacts.get_mut(hash) {
+                    match &mut xact.state {
+                        // This is what we expect
+                        PeerXactState::Pending {
+                            stage: PendingXactStage::Process { dispatched, .. },
+                            processor,
+                            class,
+                            version,
+                            instance,
+                            payload,
+                            effects,
+                            ..
+                        } => {
+                            if processor == target {
+                                trace!(target: "peer-state",
+                                   "adding transaction {}",
+                                   hash);
+                                let effects = match effects {
+                                    XactEffects::Effects { effects, hard } => {
+                                        Some(XactCommittedEffects::new(
+                                            *hard,
+                                            effects.clone()
+                                        ))
+                                    }
+                                    XactEffects::SoftNone => None,
+                                    // This shouldn't happen, but
+                                    // it's not fatal.
+                                    XactEffects::HardNone { .. } => {
+                                        error!(target: "peer-state",
+                                           concat!("transaction {} ",
+                                                   "in process stage ",
+                                                   "is hard no-effect"),
+                                           hash);
+                                        None
+                                    }
+                                };
+
+                                reqs.push(XactCommittedReq::new(
+                                    *class,
+                                    version.clone(),
+                                    *instance,
+                                    i,
+                                    payload.clone(),
+                                    effects
+                                ));
+
+                                *dispatched = true;
+                            } else {
+                                trace!(target: "peer-state",
+                                   "skipping transaction {} targeted at {}",
+                                   hash, processor);
+                            }
+                        }
+                        // Transaction is in the wrong stage.
+                        PeerXactState::Pending { .. } => {
+                            error!(target: "peer-state",
+                                   "transaction {} isn't in process stage",
+                                   hash);
+                        }
+                        // Transaction is in the wrong state.
+                        _ => {
+                            trace!(target: "peer-state",
+                                   "marking transaction {} complete",
+                                   hash);
+
+                            self.completed.set(i, true);
+                        }
+                    }
+                } else {
+                    // This shouldn't happen.
+                    error!(target: "peer-state",
+                           "unknown transaction {} in round {}",
+                           hash, round);
+                }
+            }
+
+            if !reqs.is_empty() {
+                Ok(Some(reqs))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 impl<H, Prin, Seal> PeerState<H, Prin, Seal>
 where
     Prin: Clone + Display + Eq + Hash + Send + Sync,
@@ -498,8 +624,13 @@ where
         config: PeerStateConfig,
         processors: HashMap<Uuid, ProcessorEntry>
     ) -> Self {
-        let (tombstone_duration, xacts_size_hint, seals_size_hint, retry) =
-            config.take();
+        let (
+            tombstone_duration,
+            xacts_size_hint,
+            seals_size_hint,
+            retry,
+            resubmit
+        ) = config.take();
         let (xacts, missing) = match xacts_size_hint {
             Some(size) => {
                 (HashMap::with_capacity(size), HashMap::with_capacity(size))
@@ -522,7 +653,8 @@ where
             notify: notify,
             seals: seals,
             xacts: xacts,
-            retry: retry
+            retry: retry,
+            resubmit: resubmit
         }
     }
 
@@ -540,22 +672,37 @@ where
 
         let mut xacts = self.xacts.lock().map_err(|_| MutexPoison)?;
         let mut hashes = Vec::with_capacity(xacts.len());
+        let mut curr = None;
+        let now = Instant::now();
 
         for (hash, ent) in xacts.iter_mut() {
             match &mut ent.state {
                 PeerXactState::Pending {
-                    stage: PendingXactStage::Commit { submitted },
+                    stage:
+                        PendingXactStage::Commit {
+                            submitted,
+                            when,
+                            nretries
+                        },
                     ..
                 } => {
-                    // XXX do retry information here.
+                    curr = curr.map_or(*when, |curr| {
+                        Some(when.map_or(curr, |when| when.min(curr)))
+                    });
 
-                    trace!(target: "peer-state",
-                           "submitting transaction {} to consensus",
-                           hash);
+                    if when.is_some_and(|when| when <= now) {
+                        let delay = self.resubmit.retry_delay(*nretries);
 
-                    hashes.push(hash.clone());
-                    *submitted = true;
-                    ent.reset_reporting();
+                        trace!(target: "peer-state",
+                               "submitting transaction {} to consensus",
+                               hash);
+
+                        *when = Some(now + delay);
+                        *nretries += 1;
+                        hashes.push(hash.clone());
+                        *submitted = true;
+                        ent.reset_reporting();
+                    }
                 }
                 _ => {
                     trace!(target: "peer-state",
@@ -571,7 +718,7 @@ where
             None
         };
 
-        Ok((msg, None))
+        Ok((msg, curr))
     }
 
     pub(crate) fn get_processor_msgs(
@@ -593,6 +740,8 @@ where
         // Scan pre-commit requests.
         let mut xacts = self.xacts.lock().map_err(|_| MutexPoison)?;
         let mut reqs = Vec::with_capacity(xacts.len());
+        let mut curr = None;
+        let now = Instant::now();
 
         trace!(target: "peer-state",
                "checking for pre-commit transactions for {}",
@@ -601,34 +750,46 @@ where
         for (hash, ent) in xacts.iter_mut() {
             match &mut ent.state {
                 PeerXactState::Pending {
-                    stage: PendingXactStage::PreCommit { dispatched, .. },
+                    stage:
+                        PendingXactStage::PreCommit {
+                            dispatched,
+                            nretries,
+                            when
+                        },
                     processor,
                     class,
                     version,
                     instance,
                     effects,
                     payload,
-                    seal,
-                    ..
+                    seal
                 } if processor == &target => {
-                    // XXX do retry information here.
+                    curr = curr.map_or(*when, |curr| {
+                        Some(when.map_or(curr, |when| when.min(curr)))
+                    });
 
-                    debug!(target: "peer-state",
-                           "submitting pre-commit transaction {} to {}",
-                           hash, target);
+                    if when.is_some_and(|when| when <= now) {
+                        let delay = self.resubmit.retry_delay(*nretries);
 
-                    let req = XactUncommittedHashReq::new(
-                        hash.clone(),
-                        *class,
-                        version.clone(),
-                        *instance,
-                        payload.clone(),
-                        effects.clone()
-                    );
+                        debug!(target: "peer-state",
+                               "submitting pre-commit transaction {} to {}",
+                               hash, target);
 
-                    reqs.push(XactSealed::new(seal.clone(), req));
-                    *dispatched = true;
-                    ent.reset_reporting();
+                        let req = XactUncommittedHashReq::new(
+                            hash.clone(),
+                            *class,
+                            version.clone(),
+                            *instance,
+                            payload.clone(),
+                            effects.clone()
+                        );
+
+                        *when = Some(now + delay);
+                        *nretries += 1;
+                        reqs.push(XactSealed::new(seal.clone(), req));
+                        *dispatched = true;
+                        ent.reset_reporting();
+                    }
                 }
                 _ => {
                     trace!(target: "peer-state",
@@ -644,108 +805,19 @@ where
         let mut deletes = Vec::with_capacity(seals.len());
 
         for (round, seal) in seals.iter_mut() {
-            if let Some(retry) = seal.retries.get_mut(&target) {
-                // XXX do retry here
-
-                let mask = !seal.completed.clone() & &seal.known;
+            if let Some(ConsensusSealRetry { when, .. }) =
+                seal.retries.get(&target)
+            {
+                curr = curr.map_or(*when, |curr| {
+                    Some(when.map_or(curr, |when| when.min(curr)))
+                });
 
                 // See if there are actually any transactions known to
                 // us to submit.
-                if mask.any() {
-                    let hashes = &seal.seal.hashes();
-                    // There are transactions we can submit.
-                    let mut reqs = Vec::with_capacity(mask.count_ones());
-
-                    for i in mask.iter_ones() {
-                        let hash = &hashes[i];
-
-                        if let Some(xact) = xacts.get_mut(hash) {
-                            match &mut xact.state {
-                                // This is what we expect
-                                PeerXactState::Pending {
-                                    stage:
-                                        PendingXactStage::Process {
-                                            dispatched, ..
-                                        },
-                                    processor,
-                                    class,
-                                    version,
-                                    instance,
-                                    payload,
-                                    effects,
-                                    ..
-                                } => {
-                                    if processor == &target {
-                                        trace!(target: "peer-state",
-                                           "adding transaction {}",
-                                           hash);
-                                        let effects = match effects {
-                                            XactEffects::Effects {
-                                                effects,
-                                                hard
-                                            } => {
-                                                Some(XactCommittedEffects::new(
-                                                    *hard,
-                                                    effects.clone()
-                                                ))
-                                            }
-                                            XactEffects::SoftNone => None,
-                                            // This shouldn't happen, but
-                                            // it's not fatal.
-                                            XactEffects::HardNone {
-                                                ..
-                                            } => {
-                                                error!(target: "peer-state",
-                                                   concat!("transaction {} ",
-                                                           "in process stage ",
-                                                           "is hard no-effect"),
-                                                   hash);
-                                                None
-                                            }
-                                        };
-
-                                        reqs.push(XactCommittedReq::new(
-                                            *class,
-                                            version.clone(),
-                                            *instance,
-                                            i,
-                                            payload.clone(),
-                                            effects
-                                        ));
-
-                                        *dispatched = true;
-                                    } else {
-                                        trace!(target: "peer-state",
-                                           concat!("skipping transaction {} ",
-                                                   "targeted at {}"),
-                                           hash, processor);
-                                    }
-                                }
-                                // Transaction is in the wrong stage.
-                                PeerXactState::Pending { .. } => {
-                                    error!(target: "peer-state",
-                                           concat!("transaction {} isn't in ",
-                                                   "process stage"),
-                                           hash);
-                                }
-                                // Transaction is in the wrong state.
-                                _ => {
-                                    trace!(target: "peer-state",
-                                           "marking transaction {} complete",
-                                           hash);
-
-                                    seal.completed.set(i, true);
-                                }
-                            }
-                        } else {
-                            // This shouldn't happen.
-                            error!(target: "peer-state",
-                                   "unknown transaction {} in for round {}",
-                                   hash, round);
-                        }
-                    }
-
-                    if !reqs.is_empty() {
+                if when.is_some_and(|when| when < now) {
+                    let retry = if let Some(reqs) =
+                        seal.get_processor_reqs(&mut xacts, &target, round)?
+                    {
                         debug!(target: "peer-state",
                                "submitting round {} to {}",
                                round, target);
@@ -753,13 +825,27 @@ where
                         let round = XactCommittedRound::new(*round, None, reqs);
 
                         rounds.push(round);
-                    }
-                } else {
-                    // There are transactions left, but we don't have them yet.
 
-                    trace!(target: "peer-state",
-                           "no transactions available for seal for round {}",
-                           round);
+                        true
+                    } else {
+                        false
+                    };
+
+                    if let Some(ConsensusSealRetry { nretries, when }) =
+                        seal.retries.get_mut(&target)
+                    {
+                        if retry {
+                            let delay = self.resubmit.retry_delay(*nretries);
+
+                            *when = Some(now + delay);
+                            *nretries += 1;
+                        } else {
+                            *when = None
+                        }
+                    } else {
+                        error!(target: "peer-state",
+                               "retry entry not present in seal!")
+                    }
                 }
 
                 if seal.completed.all() {
@@ -784,7 +870,7 @@ where
             }
         }
 
-        Ok((rounds, reqs, None))
+        Ok((rounds, reqs, curr))
     }
 
     /// Collect outbound messages for clients.
@@ -819,8 +905,13 @@ where
                        "generating message for transaction {}",
                        hash);
 
-                let (action, next) =
-                    xact.get_client_msg(hash, now, client, &mut notifies);
+                let (action, next) = xact.get_client_msg(
+                    hash,
+                    now,
+                    client,
+                    &self.resubmit,
+                    &mut notifies
+                );
 
                 match action {
                     DeleteAction::Unsubscribe => {
@@ -958,8 +1049,8 @@ where
                     ent.get_mut().reporting.insert(client.clone(), report);
                     self.notify.notify().map_err(|_| MutexPoison)?;
                 }
-                // Check if the transaction in a known missing transaction.
                 Entry::Vacant(ent) => {
+                    // Check if the transaction in a known missing transaction.
                     if let Some(round) = self
                         .missing
                         .lock()
@@ -1027,6 +1118,19 @@ where
                                    "transaction {} is in not in round {}",
                                    hash, round);
                             }
+
+                            // Update the retry entry.
+                            match seal_ent.retries.entry(idx) {
+                                Entry::Occupied(mut ent) => {
+                                    ent.get_mut().when = Some(Instant::now())
+                                }
+                                Entry::Vacant(ent) => {
+                                    ent.insert(ConsensusSealRetry {
+                                        nretries: 0,
+                                        when: Some(Instant::now())
+                                    });
+                                }
+                            }
                         } else {
                             // This should never happen.
                             error!(target: "peer-state",
@@ -1046,7 +1150,11 @@ where
                                    "transaction {} needs a consensus round",
                                    hash);
 
-                                PendingXactStage::Commit { submitted: false }
+                                PendingXactStage::Commit {
+                                    when: Some(Instant::now()),
+                                    nretries: 0,
+                                    submitted: false
+                                }
                             }
                             // Otherwise, we try to process the transaction
                             // without a commit.
@@ -1058,6 +1166,8 @@ where
                                    hash);
 
                                 PendingXactStage::PreCommit {
+                                    when: Some(Instant::now()),
+                                    nretries: 0,
                                     dispatched: false
                                 }
                             }
@@ -1450,6 +1560,10 @@ where
         round: u128,
         seal: XactConsensusSeal<H, Seal>
     ) -> Result<(), MutexPoison> {
+        trace!(target: "peer-state",
+               "adding consensus seal for round {}",
+               round);
+
         let nents = seal.nhashes();
         let completed = bitvec![0; nents];
         let mut known = bitvec![1; nents];
@@ -1459,6 +1573,10 @@ where
         let now = Instant::now();
 
         if let Entry::Vacant(ent) = seals.entry(round) {
+            trace!(target: "peer-state",
+                   "consensus seal for round {} is new",
+                   round);
+
             // Go through all the transactions in the seal and update
             // their states.
             for (i, hash) in seal.hashes().iter().enumerate() {
@@ -1474,13 +1592,16 @@ where
                         {
                             ent.insert(ConsensusSealRetry {
                                 nretries: 0,
-                                when: now
+                                when: Some(now)
                             });
                         }
 
                         if !matches!(
                             stage,
-                            PendingXactStage::Commit { submitted: true }
+                            PendingXactStage::Commit {
+                                submitted: true,
+                                ..
+                            }
                         ) {
                             error!(target: "peer-state",
                                    concat!("consensus seal references ",
@@ -1527,7 +1648,7 @@ where
             });
             self.notify.notify().map_err(|_| MutexPoison)?;
         } else {
-            debug!(target: "peer-state",
+            trace!(target: "peer-state",
                    "consensus seal for round {} already processed",
                    round);
         }
