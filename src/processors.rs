@@ -1,4 +1,4 @@
-// Copyright © 2024-25 The Johns Hopkins Applied Physics Laboratory LLC.
+// Copyright © 2024-26 The Johns Hopkins Applied Physics Laboratory LLC.
 //
 // This program is free software: you can redistribute it and/or
 // modify it under the terms of the GNU Affero General Public License,
@@ -18,6 +18,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
@@ -29,16 +30,16 @@ use std::time::Instant;
 
 use constellation_auth::authn::AuthNMsgRecv;
 use constellation_auth::authn::PassthruMsgAuthN;
-use constellation_common::codec::Codec;
+use constellation_common::codec::Decoder;
+use constellation_common::codec::Encoder;
+use constellation_common::config::Create;
 use constellation_common::error::ErrorScope;
 use constellation_common::error::ScopedError;
 use constellation_common::error::WithMutexPoison;
 use constellation_common::hashid::HashAlgo;
 use constellation_common::hashid::HashID;
-use constellation_common::ids::IDGen;
 use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::Notify;
-use constellation_component_common::bus::large_obj::dispatch::SessionDispatch;
 use constellation_component_common::xact::XactBatchBlobCodec;
 use constellation_component_common::xact::XactBlobBatch;
 use constellation_component_common::xact::XactNotifyState;
@@ -58,27 +59,27 @@ use log::warn;
 use crate::state::PeerState;
 use crate::state::ProcessorIdx;
 
-pub(crate) struct ProcessorSessionDispatch<H, IDs, Prin, Seal, SealCodec>
-where
-    SealCodec: Clone + Codec<Seal>,
-    SealCodec::Param: Clone + Default,
-    Seal: Clone,
-    H: Clone + Default + HashAlgo + Send,
-    H::HashID: Clone + Display + Hash + HashID + Eq + Send,
-    IDs: IDGen + Iterator<Item = LargeObjID> + Send,
-    IDs::Config: Clone,
-    Prin: Clone + Display + Eq + Hash + Send + Sync {
-    hash: PhantomData<H>,
-    ids: PhantomData<IDs>,
-    sessions: Arc<Mutex<HashMap<Prin, ProcessorSession>>>,
-    state: Arc<PeerState<H::HashID, Prin, Seal>>,
+pub trait ProcessorSessionDispatchTypes {
+    type Prin: Clone + Display + Eq + Hash + Send + Sync;
+    type Seal: Clone;
+    type SealCodec: Decoder<Self::Seal> + Encoder<Self::Seal> + Create;
+    type HashID: Clone + Display + Hash + HashID + Eq + Send;
+    type Hash: Clone + Default + HashAlgo<HashID = Self::HashID> + Send;
+    type IDsConfig: Clone  + Default;
+    type IDs: Iterator<Item = LargeObjID> + Create<Config = Self::Config> + Send;
+}
+
+pub(crate) struct ProcessorSessionDispatch<Types>
+where Types: ProcessorSessionDispatchTypes {
+    sessions: Arc<Mutex<HashMap<Types::Prin, ProcessorSession>>>,
+    state: Arc<PeerState<Types::HashID, Types::Prin, Types::Seal>>,
     config: LargeObjProtoConfig<
-        <XactBatchBlobCodec<u128, H, Seal, SealCodec> as Codec<
-            XactBlobBatch<u128, H::HashID, Seal>
+        <XactBatchBlobCodec<u128, Types::Hash, Types::Seal, Types::SealCodec> as Codec<
+            XactBlobBatch<u128, Types::HashID, Types::Seal>
         >>::Param,
-        IDs::Config
+        Types::IDsConfig
     >,
-    processors: HashMap<Prin, ProcessorIdx>
+    processors: HashMap<Types::Prin, ProcessorIdx>
 }
 
 #[derive(Clone)]
@@ -127,18 +128,8 @@ pub(crate) enum ProcessorSessionRecvError<Prin> {
     MutexPoison
 }
 
-unsafe impl<H, IDs, Prin, Seal, SealCodec> Send
-    for ProcessorSessionDispatch<H, IDs, Prin, Seal, SealCodec>
-where
-    SealCodec: Clone + Codec<Seal>,
-    SealCodec::Param: Clone + Default,
-    Seal: Clone,
-    H: Clone + Default + HashAlgo + Send,
-    H::HashID: Clone + Display + Hash + HashID + Eq + Send,
-    IDs: IDGen + Iterator<Item = LargeObjID> + Send,
-    IDs::Config: Clone,
-    Prin: Clone + Display + Eq + Hash + Send + Sync
-{
+unsafe impl<Types> Send for ProcessorSessionDispatch<Types>
+where Types: ProcessorSessionDispatchTypes {
 }
 
 unsafe impl<H, IDs, Prin, Seal, SealCodec> Sync
@@ -149,7 +140,7 @@ where
     Seal: Clone,
     H: Clone + Default + HashAlgo + Send,
     H::HashID: Clone + Display + Hash + HashID + Eq + Send,
-    IDs: IDGen + Iterator<Item = LargeObjID> + Send,
+    IDs: Iterator<Item = LargeObjID> + Send,
     IDs::Config: Clone,
     Prin: Clone + Display + Eq + Hash + Send + Sync
 {
@@ -182,7 +173,7 @@ where
     type AddMsgsError<Encode>
         = WithMutexPoison<LargeObjProtoAddOutboundError<Encode>>
     where
-        Encode: Display + ScopedError;
+        Encode: Debug + Display + ScopedError;
 
     fn add_msgs<WrapperCodec, F>(
         &mut self,
@@ -345,7 +336,7 @@ where
     Seal: Clone,
     H: Clone + Default + HashAlgo + Send,
     H::HashID: Clone + Display + Hash + HashID + Eq + Send,
-    IDs: IDGen + Iterator<Item = LargeObjID> + Send,
+    IDs: Iterator<Item = LargeObjID> + Send,
     IDs::Config: Clone,
     Prin: Clone + Display + Eq + Hash + Send + Sync
 {
@@ -387,7 +378,7 @@ impl<H, IDs, Prin, Seal, SealCodec>
 where
     H: Clone + Default + HashAlgo + Send,
     H::HashID: Clone + Display + Hash + HashID + Eq + Send,
-    IDs: IDGen + Iterator<Item = LargeObjID> + Send,
+    IDs: Iterator<Item = LargeObjID> + Send,
     IDs::Config: Clone,
     Prin: Clone + Display + Eq + Hash + Send + Sync,
     Seal: Clone,

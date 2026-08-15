@@ -1,4 +1,4 @@
-// Copyright © 2024-25 The Johns Hopkins Applied Physics Laboratory LLC.
+// Copyright © 2024-26 The Johns Hopkins Applied Physics Laboratory LLC.
 //
 // This program is free software: you can redistribute it and/or
 // modify it under the terms of the GNU Affero General Public License,
@@ -30,16 +30,15 @@ use std::time::Instant;
 
 use constellation_auth::authn::AuthNMsgRecv;
 use constellation_auth::authn::PassthruMsgAuthN;
-use constellation_common::codec::Codec;
+use constellation_common::codec::Decoder;
+use constellation_common::codec::Encoder;
 use constellation_common::error::ErrorScope;
 use constellation_common::error::ScopedError;
 use constellation_common::error::WithMutexPoison;
 use constellation_common::hashid::HashAlgo;
 use constellation_common::hashid::HashID;
-use constellation_common::ids::IDGen;
 use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::Notify;
-use constellation_component_common::bus::large_obj::dispatch::SessionDispatch;
 use constellation_component_common::xact::XactBatchBlobCodec;
 use constellation_component_common::xact::XactBlobBatch;
 use constellation_streams::config::LargeObjProtoConfig;
@@ -64,7 +63,7 @@ where
     Seal: Clone,
     H: Clone + Default + HashAlgo + Send,
     H::HashID: Clone + Display + Hash + HashID + Eq + Send,
-    IDs: IDGen + Iterator<Item = LargeObjID> + Send,
+    IDs: Iterator<Item = LargeObjID> + Send,
     IDs::Config: Clone,
     Prin: Clone + Display + Eq + Hash + Send + Sync {
     hash: PhantomData<H>,
@@ -134,7 +133,7 @@ where
     Seal: Clone,
     H: Clone + Default + HashAlgo + Send,
     H::HashID: Clone + Display + Hash + HashID + Eq + Send,
-    IDs: IDGen + Iterator<Item = LargeObjID> + Send,
+    IDs: Iterator<Item = LargeObjID> + Send,
     IDs::Config: Clone,
     Prin: Clone + Display + Eq + Hash + Send + Sync
 {
@@ -148,7 +147,7 @@ where
     Seal: Clone,
     H: Clone + Default + HashAlgo + Send,
     H::HashID: Clone + Display + Hash + HashID + Eq + Send,
-    IDs: IDGen + Iterator<Item = LargeObjID> + Send,
+    IDs: Iterator<Item = LargeObjID> + Send,
     IDs::Config: Clone,
     Prin: Clone + Display + Eq + Hash + Send + Sync
 {
@@ -322,7 +321,7 @@ where
     Seal: Clone,
     H: Clone + Default + HashAlgo + Send,
     H::HashID: Clone + Display + Hash + HashID + Eq + Send,
-    IDs: IDGen + Iterator<Item = LargeObjID> + Send,
+    IDs: Iterator<Item = LargeObjID> + Send,
     IDs::Config: Clone,
     Prin: Clone + Display + Eq + Hash + Send + Sync
 {
@@ -362,7 +361,7 @@ impl<H, IDs, Prin, Seal, SealCodec>
 where
     H: Clone + Default + HashAlgo + Send,
     H::HashID: Clone + Display + Hash + HashID + Eq + Send,
-    IDs: IDGen + Iterator<Item = LargeObjID> + Send,
+    IDs: Iterator<Item = LargeObjID> + Send,
     IDs::Config: Clone,
     Prin: Clone + Display + Eq + Hash + Send + Sync,
     Seal: Clone,

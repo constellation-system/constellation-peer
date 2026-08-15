@@ -1,4 +1,4 @@
-// Copyright © 2024-25 The Johns Hopkins Applied Physics Laboratory LLC.
+// Copyright © 2024-26 The Johns Hopkins Applied Physics Laboratory LLC.
 //
 // This program is free software: you can redistribute it and/or
 // modify it under the terms of the GNU Affero General Public License,
@@ -32,41 +32,27 @@ use clap::ArgMatches;
 use constellation_auth::authn::MsgAuthN;
 use constellation_auth::authn::PassthruMsgAuthN;
 use constellation_auth::authn::SessionAuthN;
-use constellation_auth::authn::TestAuthN;
 use constellation_auth::config::TestCredConfig;
-use constellation_channels::config::ChannelRegistryChannelsConfig;
 use constellation_channels::config::CompoundFarEndpoint;
 use constellation_channels::config::ResolverConfig;
 use constellation_channels::far::compound::CompoundFarChannel;
-use constellation_channels::far::compound::CompoundFarChannelThreadedFlows;
 use constellation_channels::far::compound::CompoundFarChannelXfrm;
-use constellation_channels::far::flows::OwnedFlowNegotiator;
-use constellation_channels::far::flows::OwnedFlowsCreate;
-use constellation_channels::far::flows::ThreadedFlowsListener;
-#[cfg(feature = "standalone")]
-use constellation_channels::far::registry::CompoundFarChannelRegistry;
-use constellation_channels::far::registry::FarChannelRegistryAcquireError;
-use constellation_channels::far::registry::FarChannelRegistryChannelsCreateError;
-use constellation_channels::far::registry::FarChannelRegistryCtx;
-use constellation_channels::far::registry::FarChannelRegistryID;
-use constellation_channels::far::registry::RegistryAcquireError;
 use constellation_channels::far::udp::UDPDatagramXfrm;
 use constellation_channels::far::unix::UnixDatagramXfrm;
 use constellation_channels::far::FarChannelAcquired;
 use constellation_channels::far::FarChannelAcquiredResolve;
 use constellation_channels::far::FarChannelCreate;
 use constellation_channels::far::FarChannelFlowsError;
-use constellation_channels::far::FarChannelOwnedFlows;
 use constellation_channels::resolve::cache::NSNameCachesCtx;
 use constellation_channels::resolve::cache::ThreadedNSNameCaches;
 use constellation_channels::resolve::MixedResolver;
-use constellation_common::codec::Codec;
+use constellation_common::codec::Decoder;
+use constellation_common::codec::Encoder;
 use constellation_common::hashid::HashAlgo;
 use constellation_common::hashid::HashID;
 use constellation_common::hashid::SHA3Algo;
 use constellation_common::hashid::SHA3ID;
 use constellation_common::ids::AscendingCount;
-use constellation_common::ids::IDGen;
 use constellation_common::net::DatagramXfrm;
 use constellation_common::net::DatagramXfrmCreate;
 use constellation_common::net::IPEndpointAddr;
@@ -75,13 +61,6 @@ use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::version::FullVersion;
 use constellation_common::version::Version;
 use constellation_common::version::VersionSuffix;
-use constellation_component_common::bus::large_obj::dispatch::DispatchLargeObjBus;
-use constellation_component_common::bus::large_obj::dispatch::DispatchLargeObjBusCleanup;
-use constellation_component_common::bus::large_obj::dispatch::DispatchLargeObjBusCreateError;
-use constellation_component_common::bus::large_obj::multicast::MulticastLargeObjBus;
-use constellation_component_common::bus::large_obj::multicast::MulticastLargeObjBusCleanup;
-use constellation_component_common::bus::large_obj::multicast::MulticastLargeObjBusRunError;
-use constellation_component_common::config::DispatchLargeObjBusConfig;
 use constellation_component_common::config::MulticastLargeObjBusConfig;
 use constellation_component_common::config::PartiesConfig;
 use constellation_component_common::consensus_ctl::ConsensusCtl;
@@ -103,7 +82,6 @@ use constellation_streams::large_obj::LargeObjProto;
 use constellation_streams::large_obj::LargeObjProtoCreateError;
 use constellation_streams::select::StreamSelectorCreateError;
 use constellation_streams::select::ThreadedStreamSelectorError;
-use constellation_streams::stream::ConcurrentStream;
 use constellation_streams::stream::StreamID;
 use log::debug;
 use log::error;
@@ -124,140 +102,14 @@ use crate::state::PeerState;
 use crate::state::ProcessorEntry;
 use crate::state::ProcessorIdx;
 
-pub type CompoundPeerComponent<
-    XactWrapper,
-    XactWrapperCodec,
-    H,
-    IDs,
-    XactMsgAuth,
-    CtlMsgAuth,
-    Epochs,
-    Ctx
-> = PeerComponent<
-    XactWrapper,
-    XactWrapperCodec,
-    H,
-    IDs,
-    XactMsgAuth,
-    CtlMsgAuth,
-    Epochs,
-    CompoundFarChannel,
-    CompoundFarChannelThreadedFlows<
-        Arc<TestAuthN<String, TestCred>>,
-        UnixDatagramXfrm,
-        UDPDatagramXfrm,
-        FarChannelRegistryID
-    >,
-    Arc<TestAuthN<String, TestCred>>,
-    CompoundFarChannelXfrm<UnixDatagramXfrm, UDPDatagramXfrm>,
-    MixedResolver<CompoundFarChannelXfrmPeerAddr, CompoundFarEndpoint>,
-    CompoundFarEndpoint,
-    Ctx
->;
+pub trait PeerComponentTypes {
+}
 
 // XXX this is going to need separate session authenticators, and
 // ultimately a whole separate instantiation of the flows types.  This
 // is best done with type traits, when we get to that.
-pub struct PeerComponent<
-    XactWrapper,
-    XactWrapperCodec,
-    H,
-    IDs,
-    XactMsgAuth,
-    CtlMsgAuth,
-    Epochs,
-    Channel,
-    F,
-    SessionAuth,
-    Xfrm,
-    Resolver,
-    Endpoint,
-    Ctx
-> where
-    XactWrapper: 'static + Clone + Send,
-    XactMsgAuth: 'static
-        + Clone
-        + MsgAuthN<
-            XactBlobBatch<u128, H::HashID, TestSeal>,
-            XactWrapper,
-            SessionPrin = SessionAuth::Prin,
-            Prin = SessionAuth::Prin
-        >
-        + Send,
-    XactMsgAuth::SessionPrin: Send + Sync,
-    CtlMsgAuth: 'static
-        + Clone
-        + MsgAuthN<
-            ConsensusCtl<u128, H::HashID, TestSeal>,
-            ConsensusCtl<u128, H::HashID, TestSeal>,
-            SessionPrin = SessionAuth::Prin,
-            Prin = SessionAuth::Prin
-        >
-        + Send,
-    CtlMsgAuth::SessionPrin: Send + Sync,
-    IDs: 'static + Clone + IDGen + Iterator<Item = LargeObjID> + Send,
-    H: 'static + Clone + Default + HashAlgo + Send,
-    H::HashID: 'static + Clone + Display + Hash + Eq + Send,
-    SessionAuth: 'static
-        + Clone
-        + SessionAuthN<<Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow>
-        + Send
-        + Sync,
-    SessionAuth::Prin: 'static + Clone + Display + Eq + Hash + Send + Sync,
-    XactWrapperCodec: 'static + Clone + Codec<XactWrapper> + Send,
-    <XactWrapperCodec as Codec<XactWrapper>>::Param: Default,
-    Epochs: 'static + Default + IDGen + Iterator<Item = u128> + Send + Sync,
-    Epochs::Config: Clone + Send,
-    Channel: 'static
-        + FarChannelOwnedFlows<F, SessionAuth, Xfrm>
-        + FarChannelCreate
-        + Send
-        + Sync,
-    Channel::Acquired: FarChannelAcquiredResolve<Resolved = Channel::Param>,
-    Channel::Param: Clone
-        + Display
-        + Eq
-        + Hash
-        + PartialEq
-        + ChannelParam<<Channel::Xfrm as DatagramXfrm>::PeerAddr>
-        + Send
-        + Sync,
-    Channel::Acquired:
-        FarChannelAcquiredResolve<Resolved = Channel::Param> + Send + Sync,
-    <Channel::Nego as OwnedFlowNegotiator<F::Flow>>::Flow:
-        'static + ConcurrentStream + Send,
-    <Channel::Xfrm as DatagramXfrm>::PeerAddr:
-        'static + Eq + Hash + Send + Sync,
-    F: OwnedFlowsCreate<
-            Channel::Socket,
-            Channel::Nego,
-            SessionAuth,
-            Channel::Xfrm
-        > + Send,
-    F::Flow: 'static + ConcurrentStream + Send,
-    F::CreateParam: Clone + Default + Send + Sync,
-    F::Reporter: Clone + Send + Sync,
-    F::ChannelID: 'static + From<usize> + Into<usize> + Send + Sync,
-    Xfrm:
-        DatagramXfrm + DatagramXfrmCreate<Addr = Channel::Param> + Send + Sync,
-    Xfrm::CreateParam: Clone + Default + Send + Sync,
-    Xfrm::LocalAddr: From<<Channel::Socket as Socket>::Addr>,
-    Resolver: Addrs<Addr = <Channel::Xfrm as DatagramXfrm>::PeerAddr>
-        + AddrsCreate<Ctx, Vec<Endpoint>, Config = ResolverConfig>
-        + Send
-        + Sync,
-    Resolver::Origin:
-        Clone + Eq + Hash + Into<Option<IPEndpointAddr>> + Send + Sync,
-    Endpoint: Clone + Send + Sync,
-    Ctx: 'static + NSNameCachesCtx + Send + Sync {
-    xact_wrapper: PhantomData<XactWrapper>,
-    xact_codec: PhantomData<XactWrapperCodec>,
-    hash: PhantomData<H>,
-    xact_auth: PhantomData<XactMsgAuth>,
-    ctl_auth: PhantomData<CtlMsgAuth>,
-    ids: PhantomData<IDs>,
-    resolver: PhantomData<Resolver>,
-    endpoint: PhantomData<Endpoint>,
+pub struct PeerComponent<Types>
+where Types: PeerComponentTypes {
     client_comm_config: DispatchLargeObjBusConfig<Epochs::Config>,
     client_large_obj_config: LargeObjProtoConfig<
         <XactBatchBlobCodec<u128, H, TestSeal, TestSealCodec> as Codec<
