@@ -16,20 +16,18 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
+use std::fmt::Debug;
 use std::fmt::Display;
-use std::hash::Hash;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Instant;
 
 use constellation_auth::authn::AuthNMsgRecv;
-use constellation_common::codec::Decoder;
 use constellation_common::codec::Encoder;
+use constellation_common::config::Create;
 use constellation_common::error::MutexPoison;
 use constellation_common::error::ScopedError;
 use constellation_common::error::WithMutexPoison;
-use constellation_common::hashid::HashAlgo;
-use constellation_common::hashid::HashID;
 use constellation_component_common::consensus_ctl::ConsensusCtl;
 use constellation_component_common::xact::XactConsensusSeal;
 use constellation_streams::frags::Frags;
@@ -40,68 +38,48 @@ use log::debug;
 use log::warn;
 
 use crate::state::PeerState;
+use crate::state::ConsensusRoundID;
+use crate::types::ConsensusMsgTypes;
+use crate::types::SealTypes;
 
 #[derive(Clone)]
-pub(crate) struct ConsensusRecv<H, Prin, Seal>
+pub(crate) struct ConsensusRecv<Types>
 where
-    H: Clone + Display + Hash + HashID + Eq + Send,
-    Prin: Clone + Display + Eq + Hash + Send + Sync,
-    Seal: Clone {
-    hash: PhantomData<H>,
-    state: Arc<PeerState<H, Prin, Seal>>
+    Types: SealTypes {
+    state: Arc<PeerState<Types>>
 }
 
 #[derive(Clone)]
-pub(crate) struct ConsensusMsgs<H, Prin, Seal>
+pub(crate) struct ConsensusMsgs<Types>
 where
-    Prin: Clone + Display + Eq + Hash + Send + Sync,
-    H: HashAlgo,
-    H::HashID: Clone + Display + Eq + Hash + HashID,
-    Seal: Clone {
-    state: Arc<PeerState<H::HashID, Prin, Seal>>
+    Types: SealTypes {
+    state: Arc<PeerState<Types>>
 }
 
-unsafe impl<H, Prin, Seal> Send for ConsensusRecv<H, Prin, Seal>
+impl<Types> LargeObjMsgs<
+    Types::Hash,
+    ConsensusCtl<ConsensusRoundID, Types::HashID, Types::Seal>
+> for ConsensusMsgs<Types>
 where
-    H: Clone + Display + Hash + HashID + Eq + Send,
-    Prin: Clone + Display + Eq + Hash + Send + Sync,
-    Seal: Clone
-{
-}
-
-unsafe impl<H, Prin, Seal> Sync for ConsensusRecv<H, Prin, Seal>
-where
-    H: Clone + Display + Hash + HashID + Eq + Send,
-    Prin: Clone + Display + Eq + Hash + Send + Sync,
-    Seal: Clone
-{
-}
-
-impl<H, Prin, Seal> LargeObjMsgs<H, ConsensusCtl<u128, H::HashID, Seal>>
-    for ConsensusMsgs<H, Prin, Seal>
-where
-    Prin: Clone + Display + Eq + Hash + Send + Sync,
-    H: Clone + HashAlgo,
-    H::HashID: Clone + Display + Eq + Hash + HashID,
-    Seal: Clone
-{
+    Types: SealTypes {
     type AddMsgsError<Encode>
         = WithMutexPoison<LargeObjProtoAddOutboundError<Encode>>
     where
-        Encode: Display + ScopedError;
+        Encode: Debug + Display + ScopedError;
 
     fn add_msgs<WrapperCodec, F>(
         &mut self,
         sender: &mut LargeObjSender<
-            H,
-            ConsensusCtl<u128, H::HashID, Seal>,
+            Types::Hash,
+            ConsensusCtl<ConsensusRoundID, Types::HashID, Types::Seal>,
             WrapperCodec,
             F
         >
     ) -> Result<Option<Instant>, Self::AddMsgsError<WrapperCodec::EncodeError>>
     where
-        WrapperCodec: Clone + Codec<ConsensusCtl<u128, H::HashID, Seal>>,
-        WrapperCodec::Param: Default,
+        WrapperCodec: Clone + Create
+        + Encoder<ConsensusCtl<ConsensusRoundID, Types::HashID, Types::Seal>>,
+        WrapperCodec::Config: Default,
         F: Frags {
         let (submit, next) = self.state.get_consensus_msgs()?;
 
@@ -110,7 +88,7 @@ where
 
             sender
                 .add_outbound(&submit)
-                .map_err(|err| WithMutexPoison::Inner { error: err })?;
+                .map_err(|err| WithMutexPoison::Inner { err: err })?;
 
             Ok(next)
         } else {
@@ -119,12 +97,13 @@ where
     }
 }
 
-impl<Prin, H, Seal> AuthNMsgRecv<Prin, ConsensusCtl<u128, H, Seal>>
-    for ConsensusRecv<H, Prin, Seal>
+impl<Types> AuthNMsgRecv<
+    Types::Prin,
+    ConsensusCtl<ConsensusRoundID, Types::HashID, Types::Seal>,
+    Types::ConsensusAuthMsg
+> for ConsensusRecv<Types>
 where
-    H: Clone + Display + Hash + HashID + Eq + Send,
-    Prin: Clone + Display + Eq + Hash + Send + Sync,
-    Seal: Clone
+    Types: ConsensusMsgTypes
 {
     /// Errors that can occur reporting messages.
     type RecvError = MutexPoison;
@@ -132,9 +111,10 @@ where
     /// Receive an authenticated message.
     fn recv_auth_msg(
         &mut self,
-        prin: &Prin,
-        msg: ConsensusCtl<u128, H, Seal>
+        msg: Types::ConsensusAuthMsg
     ) -> Result<(), Self::RecvError> {
+        let (prin, msg) = msg.take();
+
         if let ConsensusCtl::Round(round) = msg {
             debug!(target: "consensus-session-recv",
                    "received consensus round from {}",
@@ -159,29 +139,25 @@ where
     }
 }
 
-impl<H, Prin, Seal> ConsensusMsgs<H, Prin, Seal>
+impl<Types> ConsensusMsgs<Types>
 where
-    Prin: Clone + Display + Eq + Hash + Send + Sync,
-    H: Clone + HashAlgo,
-    H::HashID: Clone + Display + Eq + Hash + HashID,
-    Seal: Clone
-{
+    Types: SealTypes {
     #[inline]
-    pub(crate) fn new(state: Arc<PeerState<H::HashID, Prin, Seal>>) -> Self {
+    pub(crate) fn new(
+        state: Arc<PeerState<Types>>
+    ) -> Self {
         ConsensusMsgs { state: state }
     }
 }
 
-impl<Prin, H, Seal> ConsensusRecv<H, Prin, Seal>
+impl<Types> ConsensusRecv<Types>
 where
-    H: Clone + Display + Hash + HashID + Eq + Send,
-    Prin: Clone + Display + Eq + Hash + Send + Sync,
-    Seal: Clone
-{
+    Types: SealTypes {
     #[inline]
-    pub(crate) fn new(state: Arc<PeerState<H, Prin, Seal>>) -> Self {
+    pub(crate) fn new(
+        state: Arc<PeerState<Types>>
+    ) -> Self {
         ConsensusRecv {
-            hash: PhantomData,
             state: state
         }
     }

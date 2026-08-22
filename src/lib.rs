@@ -24,5 +24,6 @@ pub mod component;
 pub mod config;
 pub mod consensus;
 pub mod processors;
+pub mod types;
 
 mod state;
