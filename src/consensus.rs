@@ -18,10 +18,10 @@
 
 use std::fmt::Debug;
 use std::fmt::Display;
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Instant;
 
+use constellation_auth::authn::AuthNedDestruct;
 use constellation_auth::authn::AuthNMsgRecv;
 use constellation_common::codec::Encoder;
 use constellation_common::config::Create;
@@ -99,7 +99,6 @@ where
 
 impl<Types> AuthNMsgRecv<
     Types::Prin,
-    ConsensusCtl<ConsensusRoundID, Types::HashID, Types::Seal>,
     Types::ConsensusAuthMsg
 > for ConsensusRecv<Types>
 where

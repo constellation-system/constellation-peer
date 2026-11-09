@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
 
+use constellation_auth::authn::AuthNedDestruct;
 use constellation_auth::authn::AuthNMsgRecv;
 use constellation_common::codec::Encoder;
 use constellation_common::config::Create;
@@ -36,11 +37,10 @@ use constellation_common::error::ScopedError;
 use constellation_common::error::WithMutexPoison;
 use constellation_common::hashid::HashID;
 use constellation_common::shutdown::ShutdownFlag;
-use constellation_common::sync::Notify;
+use constellation_common::sync::NotifyFlag;
 use constellation_component_common::bus::dispatch::SessionDispatch;
 use constellation_component_common::xact::XactBatchBlobCodec;
 use constellation_component_common::xact::XactBlobBatch;
-use constellation_streams::config::LargeObjProtoConfig;
 use constellation_streams::frags::Frags;
 use constellation_streams::large_obj::LargeObjMsgs;
 use constellation_streams::large_obj::LargeObjProtoAddOutboundError;
@@ -181,7 +181,6 @@ where
 
 impl<Types> AuthNMsgRecv<
     Types::Prin,
-    XactBlobBatch<ConsensusRoundID, Types::HashID, Types::Seal>,
     Types::ClientAuthMsg
 >
     for ClientSessionRecv<Types>
@@ -207,7 +206,7 @@ where
             .map_err(|_| ClientSessionRecvError::MutexPoison)?;
         // This is a placeholder for eventual authorization.
         let session = sessions
-            .get_mut(prin)
+            .get_mut(&prin)
             .ok_or(ClientSessionRecvError::NotFound { prin: prin.clone() })?;
         let (committed, reqs, notifies) = msg.take();
 
@@ -227,7 +226,7 @@ where
                 .insert(hash.clone());
             self.state
                 .add_xact(
-                    prin, class, version, instance, hash, effects, payload,
+                    &prin, class, version, instance, hash, effects, payload,
                     seal
                 )
                 .map_err(|_| ClientSessionRecvError::MutexPoison)?;
@@ -286,8 +285,8 @@ where
     fn session(
         &self,
         prin: &Types::Prin,
-        shutdown: ShutdownFlag,
-        notify: Notify
+        _shutdown: ShutdownFlag,
+        _notify: NotifyFlag
     ) -> Result<
         (
             ShutdownFlag,
@@ -303,7 +302,7 @@ where
         let (local_shutdown, subscriptions) = match sessions.entry(prin.clone())
         {
             Entry::Vacant(ent) => {
-                let local_shutdown = ShutdownFlag::new(shutdown);
+                let local_shutdown = ShutdownFlag::new();
                 // XXX use a size hint here.
                 let subscriptions = Arc::new(Mutex::new(HashSet::new()));
 
@@ -320,7 +319,6 @@ where
             }
             _ => Err(ClientSessionDispatchError::Exists { prin: prin.clone() })
         }?;
-        let hash = Types::Hash::default();
         let recv = ClientSessionRecv {
             sessions: self.sessions.clone(),
             state: self.state.clone()
@@ -328,7 +326,7 @@ where
         let msgs = ClientSessionMsgs {
             subscriptions: subscriptions,
             state: self.state.clone(),
-            prin: prin
+            prin: prin.clone()
         };
 
         Ok((local_shutdown, msgs, recv))

@@ -30,6 +30,7 @@ use std::time::Instant;
 use bitvec::bitvec;
 use bitvec::vec::BitVec;
 use constellation_common::error::MutexPoison;
+use constellation_common::error::WithMutexPoison;
 use constellation_common::hashid::HashID;
 use constellation_common::retry::Retry;
 use constellation_common::sync::Notify;
@@ -149,7 +150,7 @@ where
     state: PeerXactState<Seal>
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct InstanceEntry {
     /// Local processor ID.
     processor: ProcessorIdx,
@@ -199,8 +200,9 @@ where
     retry: Retry,
     /// Resubmission configuration.
     resubmit: Retry,
-    /// Notification for changes.
-    notify: Notify
+    consensus_notify: Notify,
+    processor_notify: Notify,
+    client_notify: Notify,
 }
 
 /// Actions to be done for [get_client_msg](PeerXact::get_client_msg).
@@ -637,7 +639,10 @@ where
     #[inline]
     pub(crate) fn new(
         config: PeerStateConfig,
-        processors: HashMap<Uuid, ProcessorEntry>
+        processors: HashMap<Uuid, ProcessorEntry>,
+        consensus_notify: Notify,
+        processor_notify: Notify,
+        client_notify: Notify,
     ) -> Self {
         let (
             tombstone_duration,
@@ -659,23 +664,19 @@ where
         let missing = Mutex::new(missing);
         let xacts = Mutex::new(xacts);
         let seals = Mutex::new(seals);
-        let notify = Notify::new();
 
         PeerState {
             tombstone_duration: tombstone_duration,
             processors: processors,
             missing: missing,
-            notify: notify,
+            consensus_notify: consensus_notify,
+            processor_notify: processor_notify,
+            client_notify: client_notify,
             seals: seals,
             xacts: xacts,
             retry: retry,
             resubmit: resubmit
         }
-    }
-
-    #[inline]
-    pub(crate) fn notify(&self) -> Notify {
-        self.notify.clone()
     }
 
     pub(crate) fn get_consensus_msgs(
@@ -1040,7 +1041,7 @@ where
         effects: XactEffects<ConsensusRoundID, Vec<u8>>,
         payload: Vec<u8>,
         seal: Types::Seal
-    ) -> Result<(), MutexPoison> {
+    ) -> Result<(), WithMutexPoison<std::io::Error>> {
         let report = PeerReport {
             kind: PeerReportKind::Result,
             when: Some(Instant::now()),
@@ -1067,7 +1068,9 @@ where
 
                     // The entry already exists; subscribe this client to it.
                     ent.get_mut().reporting.insert(client.clone(), report);
-                    self.notify.notify().map_err(|_| MutexPoison)?;
+                    self.client_notify
+                        .notify()
+                        .map_err(|err| WithMutexPoison::Inner { err: err })?;
                 }
                 Entry::Vacant(ent) => {
                     // Check if the transaction in a known missing transaction.
@@ -1129,9 +1132,16 @@ where
                                    hash);
 
                                 seal_ent.known.set(idx, true);
-                                self.notify
+                                self.processor_notify
                                     .notify()
-                                    .map_err(|_| MutexPoison)?;
+                                    .map_err(|err| WithMutexPoison::Inner {
+                                        err: err
+                                    })?;
+                                self.client_notify
+                                    .notify()
+                                    .map_err(|err| WithMutexPoison::Inner {
+                                        err: err
+                                    })?;
                             } else {
                                 // This should never happen.
                                 error!(target: "peer-state",
@@ -1162,7 +1172,7 @@ where
                            "transaction {} is completely new",
                            hash);
 
-                        let stage = match &effects {
+                        let (stage, consensus) = match &effects {
                             // If there are effects, we go straight to
                             // consensus.
                             XactEffects::Effects { .. } => {
@@ -1170,11 +1180,11 @@ where
                                    "transaction {} needs a consensus round",
                                    hash);
 
-                                PendingXactStage::Commit {
+                                (PendingXactStage::Commit {
                                     when: Some(Instant::now()),
                                     nretries: 0,
                                     submitted: false
-                                }
+                                }, true)
                             }
                             // Otherwise, we try to process the transaction
                             // without a commit.
@@ -1185,11 +1195,11 @@ where
                                            "a consensus round"),
                                    hash);
 
-                                PendingXactStage::PreCommit {
+                                (PendingXactStage::PreCommit {
                                     when: Some(Instant::now()),
                                     nretries: 0,
                                     dispatched: false
-                                }
+                                }, false)
                             }
                         };
                         let state = PeerXactState::Pending {
@@ -1213,7 +1223,30 @@ where
                             reporting: reporting,
                             state: state
                         });
-                        self.notify.notify().map_err(|_| MutexPoison)?;
+                        self.client_notify
+                            .notify()
+                            .map_err(|err| WithMutexPoison::Inner {
+                                err: err
+                            })?;
+                        self.consensus_notify
+                            .notify()
+                            .map_err(|err| WithMutexPoison::Inner {
+                                err: err
+                            })?;
+
+                        if consensus {
+                            self.consensus_notify
+                                .notify()
+                                .map_err(|err| WithMutexPoison::Inner {
+                                    err: err
+                                })?;
+                        } else {
+                            self.processor_notify
+                                .notify()
+                                .map_err(|err| WithMutexPoison::Inner {
+                                    err: err
+                                })?;
+                        }
                     }
                 }
             },
@@ -1241,7 +1274,11 @@ where
                         reporting: reporting,
                         state: state
                     });
-                    self.notify.notify().map_err(|_| MutexPoison)?;
+                    self.client_notify
+                        .notify()
+                        .map_err(|err| WithMutexPoison::Inner {
+                            err: err
+                        })?;
                 }
                 // Something is very, very wrong if we get here.
                 Entry::Occupied(_) => {
@@ -1262,7 +1299,7 @@ where
         hash: Types::HashID,
         lin_point: XactLinPoint<ConsensusRoundID>,
         res: Vec<u8>
-    ) -> Result<(), MutexPoison> {
+    ) -> Result<(), WithMutexPoison<std::io::Error>> {
         debug!(target: "peer-state",
                "recording result for {}",
                hash);
@@ -1405,7 +1442,11 @@ where
                         res: res
                     };
                     xact.reset_reporting();
-                    self.notify.notify().map_err(|_| MutexPoison)?;
+                    self.client_notify
+                        .notify()
+                        .map_err(|err| WithMutexPoison::Inner {
+                            err: err
+                        })?;
                 }
                 ResultState::Error => {
                     debug!(target: "peer-state",
@@ -1428,7 +1469,11 @@ where
                         expire: expire
                     };
                     xact.reset_reporting();
-                    self.notify.notify().map_err(|_| MutexPoison)?;
+                    self.client_notify
+                        .notify()
+                        .map_err(|err| WithMutexPoison::Inner {
+                            err: err
+                        })?;
                 }
                 ResultState::Ignore => {}
             }
@@ -1445,7 +1490,7 @@ where
         &self,
         hash: Types::HashID,
         error: XactError<Vec<u8>>
-    ) -> Result<(), MutexPoison> {
+    ) -> Result<(), WithMutexPoison<std::io::Error>> {
         debug!(target: "peer-state",
                "recording error for {}",
                hash);
@@ -1546,7 +1591,11 @@ where
                         error: error
                     };
                     xact.reset_reporting();
-                    self.notify.notify().map_err(|_| MutexPoison)?;
+                    self.client_notify
+                        .notify()
+                        .map_err(|err| WithMutexPoison::Inner {
+                            err: err
+                        })?;
                 }
                 ResultState::Error => {
                     debug!(target: "peer-state",
@@ -1562,7 +1611,11 @@ where
                         expire: expire
                     };
                     xact.reset_reporting();
-                    self.notify.notify().map_err(|_| MutexPoison)?;
+                    self.client_notify
+                        .notify()
+                        .map_err(|err| WithMutexPoison::Inner {
+                            err: err
+                        })?;
                 }
                 ResultState::Ignore => {}
             }
@@ -1579,7 +1632,7 @@ where
         &self,
         round: ConsensusRoundID,
         seal: XactConsensusSeal<Types::HashID, Types::Seal>
-    ) -> Result<(), MutexPoison> {
+    ) -> Result<(), WithMutexPoison<std::io::Error>> {
         trace!(target: "peer-state",
                "adding consensus seal for round {}",
                round);
@@ -1666,7 +1719,16 @@ where
                 known: known,
                 seal: seal
             });
-            self.notify.notify().map_err(|_| MutexPoison)?;
+            self.processor_notify
+                .notify()
+                .map_err(|err| WithMutexPoison::Inner {
+                    err: err
+                })?;
+            self.client_notify
+                .notify()
+                .map_err(|err| WithMutexPoison::Inner {
+                    err: err
+                })?;
         } else {
             trace!(target: "peer-state",
                    "consensus seal for round {} already processed",

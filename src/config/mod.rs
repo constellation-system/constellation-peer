@@ -18,22 +18,15 @@
 
 use std::time::Duration;
 
-use constellation_auth::config::TestAuthNConfig;
-use constellation_auth::config::TestCredConfig;
-use constellation_channels::config::CompoundFarChannelConfig;
-use constellation_channels::config::CompoundFarEndpoint;
-use constellation_channels::config::CompoundXfrmCreateParam;
-use constellation_channels::config::ThreadedFlowsParams;
 #[cfg(feature = "standalone")]
+use constellation_auth::config::BasicAuthNConfig;
 use constellation_channels::config::ThreadedNSNameCachesConfig;
 use constellation_common::config::VersionRangeConfig;
 #[cfg(feature = "standalone")]
-use constellation_common::ids::AscendingCount;
-#[cfg(feature = "standalone")]
 use constellation_common::retry::Retry;
 use constellation_common::version::VersionRange;
+use constellation_component_common::config::DispatchLargeObjBusConfig;
 use constellation_component_common::config::MulticastLargeObjBusConfig;
-use constellation_streams::config::LargeObjProtoConfig;
 use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
@@ -42,27 +35,70 @@ use uuid::Uuid;
 #[serde(rename = "peer-config")]
 #[serde(rename_all = "kebab-case")]
 pub struct PeerConfig<
-    Prin,
-    Channel,
-    Flows,
-    Epochs,
-    LargeObj,
-    AuthN,
-    Xfrm,
-    Endpoint
+    ClientHash,
+    ClientSessAuth,
+    ClientMsgAuth,
+    ClientProtoAuth,
+    ClientUnix,
+    ClientUDP,
+    ClientIDs,
+    ClientEpochs,
+    ProcessorPrin,
+    ProcessorsHash,
+    ProcessorsSessAuth,
+    ProcessorsMsgAuth,
+    ProcessorsProtoAuth,
+    ProcessorsUnix,
+    ProcessorsUDP,
+    ProcessorsIDs,
+    ProcessorsEpochs,
+    ConsensusPrin,
+    ConsensusHash,
+    ConsensusAuthN,
+    ConsensusProtoAuthN,
+    ConsensusUnix,
+    ConsensusUDP,
+    ConsensusIDs,
+    ConsensusEpochs,
+    ConsensusMsgAuthN
 > where
-    Epochs: Default,
-    Flows: Default,
-    LargeObj: Default,
-    Xfrm: Default {
+    ClientHash: Default,
+    ClientUDP: Default,
+    ClientUnix: Default,
+    ClientIDs: Default,
+    ClientEpochs: Default,
+    ProcessorsHash: Default,
+    ProcessorsUnix: Default,
+    ProcessorsUDP: Default,
+    ProcessorsIDs: Default,
+    ProcessorsEpochs: Default,
+    ConsensusUDP: Default,
+    ConsensusUnix: Default,
+    ConsensusIDs: Default,
+    ConsensusHash: Default,
+    ConsensusEpochs: Default
+{
     /// Configuration for incoming client connections.
-    clients: ClientsConfig<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>,
+    clients: ClientsConfig<
+        ClientHash, ClientSessAuth, ClientMsgAuth, ClientProtoAuth, ClientUnix, ClientUDP, ClientIDs, ClientEpochs
+    >,
     /// Configuration for processors.
-    processors:
-        ProcessorsConfig<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>,
+    processors: ProcessorsConfig<
+        ProcessorPrin, ProcessorsHash, ProcessorsSessAuth, ProcessorsMsgAuth, ProcessorsProtoAuth, ProcessorsUnix, ProcessorsUDP, ProcessorsIDs, ProcessorsEpochs
+    >,
     /// Configuration for consensus.
-    consensus:
-        ConsensusConfig<Prin, Channel, Flows, Epochs, LargeObj, Xfrm, Endpoint>,
+    consensus: ConsensusConfig<
+        ConsensusPrin,
+        ConsensusHash,
+        ConsensusAuthN,
+        ConsensusProtoAuthN,
+        ConsensusUnix,
+        ConsensusUDP,
+        ConsensusIDs,
+        ThreadedNSNameCachesConfig,
+        ConsensusEpochs,
+        ConsensusMsgAuthN
+    >,
     /// Configuration for the peer state.
     #[serde(default)]
     #[serde(flatten)]
@@ -139,84 +175,96 @@ pub enum ProcessorClassesConfig<Prin> {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename = "processors-config")]
 #[serde(rename_all = "kebab-case")]
-pub struct ProcessorsConfig<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>
+pub struct ProcessorsConfig<Prin, Hash, SessAuth, MsgAuth, ProtoAuth, Unix, UDP, IDs, Epochs>
 where
-    Epochs: Default,
-    Flows: Default,
-    LargeObj: Default,
-    Xfrm: Default {
-    /// Channel registry configuration.
-    #[serde(flatten)]
-    registry: ChannelRegistryConfig<Channel, Flows, Xfrm>,
+    Hash: Default,
+    Unix: Default,
+    UDP: Default,
+    IDs: Default,
+    Epochs: Default {
     /// Configuration for the dispatch comm subsystem.
-    #[serde(default)]
     #[serde(flatten)]
-    bus: DispatchLargeObjBusConfig<Epochs>,
-    #[serde(default)]
-    large_obj: LargeObj,
+    bus: DispatchLargeObjBusConfig<
+        Hash,
+        SessAuth,
+        MsgAuth,
+        ProtoAuth,
+        Unix,
+        UDP,
+        (),
+        (),
+        IDs,
+        Epochs
+    >,
     /// Processors for transaction classes.
     #[serde(flatten)]
     processors: ProcessorClassesConfig<Prin>,
-    authn: AuthN
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename = "clients")]
 #[serde(rename_all = "kebab-case")]
-pub struct ClientsConfig<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>
+pub struct ClientsConfig<Hash, SessAuth, MsgAuth, ProtoAuth, Unix, UDP, IDs, Epochs>
 where
-    Epochs: Default,
-    Flows: Default,
-    LargeObj: Default,
-    Xfrm: Default {
-    /// Channel registry configuration.
-    #[serde(flatten)]
-    registry: ChannelRegistryConfig<Channel, Flows, Xfrm>,
+    Hash: Default,
+    UDP: Default,
+    Unix: Default,
+    IDs: Default,
+    Epochs: Default {
     /// Configuration for the dispatch comm subsystem.
-    #[serde(default)]
     #[serde(flatten)]
-    bus: DispatchLargeObjBusConfig<Epochs>,
-    #[serde(default)]
-    large_obj: LargeObj,
-    authn: AuthN
+    bus: DispatchLargeObjBusConfig<
+        Hash,
+        SessAuth,
+        MsgAuth,
+        ProtoAuth,
+        Unix,
+        UDP,
+        (),
+        (),
+        IDs,
+        Epochs
+    >,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename = "consensus")]
 #[serde(rename_all = "kebab-case")]
 pub struct ConsensusConfig<
     Prin,
-    Channel,
-    Flows,
+    Hash,
+    AuthN,
+    ProtoAuthN,
+    Unix,
+    UDP,
+    IDs,
+    Resolver,
     Epochs,
-    LargeObj,
-    Xfrm,
-    Endpoint
+    MsgAuthN
 > where
-    Epochs: Default,
-    Flows: Default,
-    LargeObj: Default,
-    Xfrm: Default {
-    /// Channel registry configuration.
-    #[serde(flatten)]
-    registry: ChannelRegistryConfig<Channel, Flows, Xfrm>,
+    UDP: Default,
+    Unix: Default,
+    IDs: Default,
+    Hash: Default,
+    Resolver: Default,
+    Epochs: Default {
     /// Configuration for the dispatch comm subsystem.
     #[serde(flatten)]
     multicast: MulticastLargeObjBusConfig<
         Prin,
-        ChannelRegistryChannelsConfig<()>,
+        Hash,
+        AuthN,
+        ProtoAuthN,
+        Unix,
+        UDP,
+        (),
+        (),
+        IDs,
+        Resolver,
         Epochs,
-        Endpoint
-    >,
-    #[serde(default)]
-    large_obj: LargeObj
+        MsgAuthN
+    >
 }
-
-pub type RegistryConfig = ChannelRegistryConfig<
-    CompoundFarChannelConfig,
-    ThreadedFlowsParams,
-    CompoundXfrmCreateParam<(), ()>
->;
 
 #[cfg(feature = "standalone")]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -229,14 +277,32 @@ pub struct StandaloneConfig {
     /// Configuration for incoming client connections.
     #[serde(flatten)]
     peer: PeerConfig<
+        (),
+        BasicAuthNConfig<String>,
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
         String,
-        CompoundFarChannelConfig,
-        ThreadedFlowsParams,
-        <AscendingCount<u128> as IDGen>::Config,
-        LargeObjProtoConfig<(), ()>,
-        TestAuthNConfig<String, TestCredConfig>,
-        CompoundXfrmCreateParam<(), ()>,
-        CompoundFarEndpoint
+        (),
+        BasicAuthNConfig<String>,
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        String,
+        (),
+        BasicAuthNConfig<String>,
+        (),
+        (),
+        (),
+        (),
+        (),
+        ()
     >
 }
 
@@ -288,7 +354,7 @@ impl PeerStateConfig {
 
     #[inline]
     pub fn default_resubmit() -> Retry {
-        Retry::TERRESTRIAL_LARGE_OBJ_RESUB_DEFAULT.clone()
+        Retry::TERRESTRIAL_NETWORK_RESUBMIT_DEFAULT.clone()
     }
 
     #[inline]
@@ -388,34 +454,96 @@ impl<Prin> ProcessorConfig<Prin> {
     }
 }
 
-impl<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm, Endpoint>
-    PeerConfig<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm, Endpoint>
-where
-    Epochs: Default,
-    Flows: Default,
-    LargeObj: Default,
-    Xfrm: Default
+impl<
+    ClientHash,
+    ClientSessAuth,
+    ClientMsgAuth,
+    ClientProtoAuth,
+    ClientUnix,
+    ClientUDP,
+    ClientIDs,
+    ClientEpochs,
+    ProcessorsPrin,
+    ProcessorsHash,
+    ProcessorsSessAuth,
+    ProcessorsMsgAuth,
+    ProcessorsProtoAuth,
+    ProcessorsUnix,
+    ProcessorsUDP,
+    ProcessorsIDs,
+    ProcessorsEpochs,
+    ConsensusPrin,
+    ConsensusHash,
+    ConsensusAuthN,
+    ConsensusProtoAuthN,
+    ConsensusUnix,
+    ConsensusUDP,
+    ConsensusIDs,
+    ConsensusEpochs,
+    ConsensusMsgAuthN
+> PeerConfig<
+        ClientHash,
+        ClientSessAuth,
+        ClientMsgAuth,
+        ClientProtoAuth,
+        ClientUnix,
+        ClientUDP,
+        ClientIDs,
+        ClientEpochs,
+        ProcessorsPrin,
+        ProcessorsHash,
+        ProcessorsSessAuth,
+        ProcessorsMsgAuth,
+        ProcessorsProtoAuth,
+        ProcessorsUnix,
+        ProcessorsUDP,
+        ProcessorsIDs,
+        ProcessorsEpochs,
+        ConsensusPrin,
+        ConsensusHash,
+        ConsensusAuthN,
+        ConsensusProtoAuthN,
+        ConsensusUnix,
+        ConsensusUDP,
+        ConsensusIDs,
+        ConsensusEpochs,
+        ConsensusMsgAuthN
+> where
+    ClientHash: Default,
+    ClientUDP: Default,
+    ClientUnix: Default,
+    ClientIDs: Default,
+    ClientEpochs: Default,
+    ProcessorsHash: Default,
+    ProcessorsUnix: Default,
+    ProcessorsUDP: Default,
+    ProcessorsIDs: Default,
+    ProcessorsEpochs: Default,
+    ConsensusUDP: Default,
+    ConsensusUnix: Default,
+    ConsensusIDs: Default,
+    ConsensusHash: Default,
+    ConsensusEpochs: Default
 {
     #[inline]
     pub fn new(
-        clients: ClientsConfig<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>,
+        clients: ClientsConfig<
+            ClientHash, ClientSessAuth, ClientMsgAuth, ClientProtoAuth, ClientUnix, ClientUDP, ClientIDs, ClientEpochs
+        >,
         processors: ProcessorsConfig<
-            Prin,
-            Channel,
-            Flows,
-            Epochs,
-            LargeObj,
-            AuthN,
-            Xfrm
+            ProcessorsPrin, ProcessorsHash, ProcessorsSessAuth, ProcessorsMsgAuth, ProcessorsProtoAuth, ProcessorsUnix, ProcessorsUDP, ProcessorsIDs, ProcessorsEpochs
         >,
         consensus: ConsensusConfig<
-            Prin,
-            Channel,
-            Flows,
-            Epochs,
-            LargeObj,
-            Xfrm,
-            Endpoint
+            ConsensusPrin,
+            ConsensusHash,
+            ConsensusAuthN,
+            ConsensusProtoAuthN,
+            ConsensusUnix,
+            ConsensusUDP,
+            ConsensusIDs,
+            ThreadedNSNameCachesConfig,
+            ConsensusEpochs,
+            ConsensusMsgAuthN
         >,
         state: PeerStateConfig
     ) -> Self {
@@ -430,23 +558,36 @@ where
     #[inline]
     pub fn clients(
         &self
-    ) -> &ClientsConfig<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm> {
+    ) -> &ClientsConfig<
+        ClientHash, ClientSessAuth, ClientMsgAuth, ClientProtoAuth, ClientUnix, ClientUDP, ClientIDs, ClientEpochs
+    > {
         &self.clients
     }
 
     #[inline]
     pub fn processors(
         &self
-    ) -> &ProcessorsConfig<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>
-    {
+    ) -> &ProcessorsConfig<
+        ProcessorsPrin, ProcessorsHash, ProcessorsSessAuth, ProcessorsMsgAuth, ProcessorsProtoAuth, ProcessorsUnix, ProcessorsUDP, ProcessorsIDs, ProcessorsEpochs
+    > {
         &self.processors
     }
 
     #[inline]
     pub fn consensus(
         &self
-    ) -> &ConsensusConfig<Prin, Channel, Flows, Epochs, LargeObj, Xfrm, Endpoint>
-    {
+    ) -> &ConsensusConfig<
+        ConsensusPrin,
+        ConsensusHash,
+        ConsensusAuthN,
+        ConsensusProtoAuthN,
+        ConsensusUnix,
+        ConsensusUDP,
+        ConsensusIDs,
+        ThreadedNSNameCachesConfig,
+        ConsensusEpochs,
+        ConsensusMsgAuthN
+    > {
         &self.consensus
     }
 
@@ -459,44 +600,79 @@ where
     pub fn take(
         self
     ) -> (
-        ClientsConfig<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>,
-        ProcessorsConfig<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>,
-        ConsensusConfig<Prin, Channel, Flows, Epochs, LargeObj, Xfrm, Endpoint>,
+        ClientsConfig<
+            ClientHash, ClientSessAuth, ClientMsgAuth, ClientProtoAuth, ClientUnix, ClientUDP, ClientIDs, ClientEpochs
+        >,
+        ProcessorsConfig<
+            ProcessorsPrin, ProcessorsHash, ProcessorsSessAuth, ProcessorsMsgAuth, ProcessorsProtoAuth, ProcessorsUnix, ProcessorsUDP, ProcessorsIDs, ProcessorsEpochs
+        >,
+        ConsensusConfig<
+            ConsensusPrin,
+            ConsensusHash,
+            ConsensusAuthN,
+            ConsensusProtoAuthN,
+            ConsensusUnix,
+            ConsensusUDP,
+            ConsensusIDs,
+            ThreadedNSNameCachesConfig,
+            ConsensusEpochs,
+            ConsensusMsgAuthN
+        >,
         PeerStateConfig
     ) {
         (self.clients, self.processors, self.consensus, self.state)
     }
 }
 
-impl<Prin, Channel, Flows, Epochs, LargeObj, Xfrm, Endpoint>
-    ConsensusConfig<Prin, Channel, Flows, Epochs, LargeObj, Xfrm, Endpoint>
-where
-    Epochs: Default,
-    Flows: Default,
-    LargeObj: Default,
-    Xfrm: Default
-{
+impl<
+    Prin,
+    Hash,
+    AuthN,
+    ProtoAuthN,
+    Unix,
+    UDP,
+    IDs,
+    Resolver,
+    Epochs,
+    MsgAuthN
+> ConsensusConfig<
+        Prin,
+        Hash,
+        AuthN,
+        ProtoAuthN,
+        Unix,
+        UDP,
+        IDs,
+        Resolver,
+        Epochs,
+        MsgAuthN
+> where
+    UDP: Default,
+    Unix: Default,
+    IDs: Default,
+    Hash: Default,
+    Resolver: Default,
+    Epochs: Default {
     #[inline]
     pub fn new(
-        registry: ChannelRegistryConfig<Channel, Flows, Xfrm>,
         multicast: MulticastLargeObjBusConfig<
             Prin,
-            ChannelRegistryChannelsConfig<()>,
+            Hash,
+            AuthN,
+            ProtoAuthN,
+            Unix,
+            UDP,
+            (),
+            (),
+            IDs,
+            Resolver,
             Epochs,
-            Endpoint
-        >,
-        large_obj: LargeObj
+            MsgAuthN
+        >
     ) -> Self {
         ConsensusConfig {
             multicast: multicast,
-            registry: registry,
-            large_obj: large_obj
         }
-    }
-
-    #[inline]
-    pub fn registry(&self) -> &ChannelRegistryConfig<Channel, Flows, Xfrm> {
-        &self.registry
     }
 
     #[inline]
@@ -504,129 +680,149 @@ where
         &self
     ) -> &MulticastLargeObjBusConfig<
         Prin,
-        ChannelRegistryChannelsConfig<()>,
+        Hash,
+        AuthN,
+        ProtoAuthN,
+        Unix,
+        UDP,
+        (),
+        (),
+        IDs,
+        Resolver,
         Epochs,
-        Endpoint
+        MsgAuthN
     > {
         &self.multicast
     }
 
     #[inline]
-    pub fn large_obj(&self) -> &LargeObj {
-        &self.large_obj
-    }
-
-    #[inline]
     pub fn take(
         self
-    ) -> (
-        ChannelRegistryConfig<Channel, Flows, Xfrm>,
-        MulticastLargeObjBusConfig<
-            Prin,
-            ChannelRegistryChannelsConfig<()>,
-            Epochs,
-            Endpoint
-        >,
-        LargeObj
-    ) {
-        (self.registry, self.multicast, self.large_obj)
+    ) -> MulticastLargeObjBusConfig<
+        Prin,
+        Hash,
+        AuthN,
+        ProtoAuthN,
+        Unix,
+        UDP,
+        (),
+        (),
+        IDs,
+        Resolver,
+        Epochs,
+        MsgAuthN
+    > {
+        self.multicast
     }
 }
 
-impl<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>
-    ClientsConfig<Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>
+impl<Hash, SessAuth, MsgAuth, ProtoAuth, Unix, UDP, IDs, Epochs>
+    ClientsConfig<Hash, SessAuth, MsgAuth, ProtoAuth, Unix, UDP, IDs, Epochs>
 where
-    Epochs: Default,
-    Flows: Default,
-    LargeObj: Default,
-    Xfrm: Default
-{
+    Hash: Default,
+    UDP: Default,
+    Unix: Default,
+    IDs: Default,
+    Epochs: Default {
     #[inline]
     pub fn new(
-        registry: ChannelRegistryConfig<Channel, Flows, Xfrm>,
-        bus: DispatchLargeObjBusConfig<Epochs>,
-        large_obj: LargeObj,
-        authn: AuthN
+        bus: DispatchLargeObjBusConfig<
+            Hash,
+            SessAuth,
+            MsgAuth,
+            ProtoAuth,
+            Unix,
+            UDP,
+            (),
+            (),
+            IDs,
+            Epochs
+        >
     ) -> Self {
         ClientsConfig {
-            large_obj: large_obj,
-            registry: registry,
-            authn: authn,
             bus: bus
         }
     }
 
     #[inline]
-    pub fn registry(&self) -> &ChannelRegistryConfig<Channel, Flows, Xfrm> {
-        &self.registry
-    }
-
-    #[inline]
-    pub fn bus(&self) -> &DispatchLargeObjBusConfig<Epochs> {
+    pub fn bus(&self) -> &DispatchLargeObjBusConfig<
+        Hash,
+        SessAuth,
+        MsgAuth,
+        ProtoAuth,
+        Unix,
+        UDP,
+        (),
+        (),
+        IDs,
+        Epochs
+    > {
         &self.bus
-    }
-
-    #[inline]
-    pub fn large_obj(&self) -> &LargeObj {
-        &self.large_obj
-    }
-
-    #[inline]
-    pub fn authn(&self) -> &AuthN {
-        &self.authn
     }
 
     #[inline]
     pub fn take(
         self
-    ) -> (
-        ChannelRegistryConfig<Channel, Flows, Xfrm>,
-        DispatchLargeObjBusConfig<Epochs>,
-        LargeObj,
-        AuthN
-    ) {
-        (self.registry, self.bus, self.large_obj, self.authn)
+    ) -> DispatchLargeObjBusConfig<
+        Hash,
+        SessAuth,
+        MsgAuth,
+        ProtoAuth,
+        Unix,
+        UDP,
+        (),
+        (),
+        IDs,
+        Epochs
+    > {
+        self.bus
     }
 }
 
-impl<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>
-    ProcessorsConfig<Prin, Channel, Flows, Epochs, LargeObj, AuthN, Xfrm>
+impl<Prin, Hash, SessAuth, MsgAuth, ProtoAuth, Unix, UDP, IDs, Epochs>
+    ProcessorsConfig<Prin, Hash, SessAuth, MsgAuth, ProtoAuth, Unix, UDP, IDs, Epochs>
 where
-    Epochs: Default,
-    Flows: Default,
-    LargeObj: Default,
-    Xfrm: Default
-{
+    Hash: Default,
+    Unix: Default,
+    UDP: Default,
+    IDs: Default,
+    Epochs: Default {
     #[inline]
     pub fn new(
-        registry: ChannelRegistryConfig<Channel, Flows, Xfrm>,
-        bus: DispatchLargeObjBusConfig<Epochs>,
-        large_obj: LargeObj,
+        bus: DispatchLargeObjBusConfig<
+            Hash,
+            SessAuth,
+            MsgAuth,
+            ProtoAuth,
+            Unix,
+            UDP,
+            (),
+            (),
+            IDs,
+            Epochs
+        >,
         processors: ProcessorClassesConfig<Prin>,
-        authn: AuthN
     ) -> Self {
         ProcessorsConfig {
             processors: processors,
-            large_obj: large_obj,
-            registry: registry,
-            authn: authn,
             bus: bus
         }
     }
 
     #[inline]
-    pub fn registry(&self) -> &ChannelRegistryConfig<Channel, Flows, Xfrm> {
-        &self.registry
-    }
-
-    #[inline]
-    pub fn bus(&self) -> &DispatchLargeObjBusConfig<Epochs> {
+    pub fn bus(&self) -> &DispatchLargeObjBusConfig<
+        Hash,
+        SessAuth,
+        MsgAuth,
+        ProtoAuth,
+        Unix,
+        UDP,
+        (),
+        (),
+        IDs,
+        Epochs
+    > {
         &self.bus
-    }
-
-    #[inline]
-    pub fn large_obj(&self) -> &LargeObj {
-        &self.large_obj
     }
 
     #[inline]
@@ -635,27 +831,24 @@ where
     }
 
     #[inline]
-    pub fn authn(&self) -> &AuthN {
-        &self.authn
-    }
-
-    #[inline]
     pub fn take(
         self
     ) -> (
-        ChannelRegistryConfig<Channel, Flows, Xfrm>,
-        DispatchLargeObjBusConfig<Epochs>,
-        LargeObj,
-        ProcessorClassesConfig<Prin>,
-        AuthN
+        DispatchLargeObjBusConfig<
+            Hash,
+            SessAuth,
+            MsgAuth,
+            ProtoAuth,
+            Unix,
+            UDP,
+            (),
+            (),
+            IDs,
+            Epochs
+        >,
+        ProcessorClassesConfig<Prin>
     ) {
-        (
-            self.registry,
-            self.bus,
-            self.large_obj,
-            self.processors,
-            self.authn
-        )
+        (self.bus, self.processors)
     }
 }
 
@@ -665,14 +858,32 @@ impl StandaloneConfig {
     pub fn new(
         name_caches: ThreadedNSNameCachesConfig,
         peer: PeerConfig<
+            (),
+            BasicAuthNConfig<String>,
+            (),
+            (),
+            (),
+            (),
+            (),
+            (),
             String,
-            CompoundFarChannelConfig,
-            ThreadedFlowsParams,
-            <AscendingCount<u128> as IDGen>::Config,
-            LargeObjProtoConfig<(), ()>,
-            TestAuthNConfig<String, TestCredConfig>,
-            CompoundXfrmCreateParam<(), ()>,
-            CompoundFarEndpoint
+            (),
+            BasicAuthNConfig<String>,
+            (),
+            (),
+            (),
+            (),
+            (),
+            (),
+            String,
+            (),
+            BasicAuthNConfig<String>,
+            (),
+            (),
+            (),
+            (),
+            (),
+            ()
         >
     ) -> Self {
         StandaloneConfig {
@@ -690,14 +901,32 @@ impl StandaloneConfig {
     pub fn peer(
         &self
     ) -> &PeerConfig<
+        (),
+        BasicAuthNConfig<String>,
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
         String,
-        CompoundFarChannelConfig,
-        ThreadedFlowsParams,
-        <AscendingCount<u128> as IDGen>::Config,
-        LargeObjProtoConfig<(), ()>,
-        TestAuthNConfig<String, TestCredConfig>,
-        CompoundXfrmCreateParam<(), ()>,
-        CompoundFarEndpoint
+        (),
+        BasicAuthNConfig<String>,
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        String,
+        (),
+        BasicAuthNConfig<String>,
+        (),
+        (),
+        (),
+        (),
+        (),
+        ()
     > {
         &self.peer
     }
@@ -708,14 +937,32 @@ impl StandaloneConfig {
     ) -> (
         ThreadedNSNameCachesConfig,
         PeerConfig<
+            (),
+            BasicAuthNConfig<String>,
+            (),
+            (),
+            (),
+            (),
+            (),
+            (),
             String,
-            CompoundFarChannelConfig,
-            ThreadedFlowsParams,
-            <AscendingCount<u128> as IDGen>::Config,
-            LargeObjProtoConfig<(), ()>,
-            TestAuthNConfig<String, TestCredConfig>,
-            CompoundXfrmCreateParam<(), ()>,
-            CompoundFarEndpoint
+            (),
+            BasicAuthNConfig<String>,
+            (),
+            (),
+            (),
+            (),
+            (),
+            (),
+            String,
+            (),
+            BasicAuthNConfig<String>,
+            (),
+            (),
+            (),
+            (),
+            (),
+            ()
         >
     ) {
         (self.name_caches, self.peer)
@@ -734,7 +981,7 @@ fn test_class_id_uuid() {
     let expected = ClassIDConfig::UUID {
         uuid: uuid!("67e55044-10b1-426f-9247-bb680e5fe0c8")
     };
-    let actual = serde_yaml::from_str(yaml).unwrap();
+    let actual = yaml_serde::from_str(yaml).unwrap();
 
     assert_eq!(expected, actual)
 }
@@ -745,7 +992,7 @@ fn test_class_id_name() {
     let expected = ClassIDConfig::Name {
         name: String::from("org.constellation.test")
     };
-    let actual = serde_yaml::from_str(yaml).unwrap();
+    let actual = yaml_serde::from_str(yaml).unwrap();
 
     assert_eq!(expected, actual)
 }
@@ -766,7 +1013,7 @@ fn test_class_config_no_instances() {
         instances: vec![0],
         versions: vec![version]
     };
-    let actual = serde_yaml::from_str(yaml).unwrap();
+    let actual = yaml_serde::from_str(yaml).unwrap();
 
     assert_eq!(expected, actual)
 }
@@ -790,7 +1037,7 @@ fn test_class_config_instances() {
         instances: vec![0, 1],
         versions: vec![version]
     };
-    let actual = serde_yaml::from_str(yaml).unwrap();
+    let actual = yaml_serde::from_str(yaml).unwrap();
 
     assert_eq!(expected, actual)
 }
@@ -819,7 +1066,7 @@ fn test_processor_config() {
             versions: vec![version]
         }]
     };
-    let actual = serde_yaml::from_str(yaml).unwrap();
+    let actual = yaml_serde::from_str(yaml).unwrap();
 
     assert_eq!(expected, actual)
 }
@@ -847,7 +1094,7 @@ fn test_static_processor_configs() {
             }]
         }]
     };
-    let actual = serde_yaml::from_str(yaml).unwrap();
+    let actual = yaml_serde::from_str(yaml).unwrap();
 
     assert_eq!(expected, actual)
 }

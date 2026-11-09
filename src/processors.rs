@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
 
+use constellation_auth::authn::AuthNedDestruct;
 use constellation_auth::authn::AuthNMsgRecv;
 use constellation_common::codec::Encoder;
 use constellation_common::config::Create;
@@ -33,7 +34,7 @@ use constellation_common::error::ErrorScope;
 use constellation_common::error::ScopedError;
 use constellation_common::error::WithMutexPoison;
 use constellation_common::shutdown::ShutdownFlag;
-use constellation_common::sync::Notify;
+use constellation_common::sync::NotifyFlag;
 use constellation_component_common::bus::dispatch::SessionDispatch;
 use constellation_component_common::xact::XactBatchBlobCodec;
 use constellation_component_common::xact::XactBlobBatch;
@@ -170,7 +171,6 @@ impl Drop for ProcessorSession {
 
 impl<Types> AuthNMsgRecv<
     Types::Prin,
-    XactBlobBatch<ConsensusRoundID, Types::HashID, Types::Seal>,
     Types::ProcessorAuthMsg
 > for ProcessorSessionRecv<Types>
 where
@@ -194,7 +194,7 @@ where
             .lock()
             .map_err(|_| ProcessorSessionRecvError::MutexPoison)?;
         // This is a placeholder for eventual authorization.
-        let _ = sessions.get_mut(prin).ok_or(
+        let _ = sessions.get_mut(&prin).ok_or(
             ProcessorSessionRecvError::NotFound { prin: prin.clone() }
         )?;
         let (committed, reqs, notifies) = msg.take();
@@ -306,8 +306,8 @@ where
     fn session(
         &self,
         prin: &Types::Prin,
-        shutdown: ShutdownFlag,
-        notify: Notify
+        _shutdown: ShutdownFlag,
+        _notify: NotifyFlag
     ) -> Result<
         (
             ShutdownFlag,
@@ -323,7 +323,7 @@ where
                 .map_err(|_| ProcessorSessionDispatchError::MutexPoison)?;
             let local_shutdown = match sessions.entry(prin.clone()) {
                 Entry::Vacant(ent) => {
-                    let local_shutdown = ShutdownFlag::new(shutdown);
+                    let local_shutdown = ShutdownFlag::new();
 
                     debug!(target: "processor-session-dispatch",
                            "creating session for {}",
@@ -339,7 +339,6 @@ where
                     prin: prin.clone()
                 })
             }?;
-            let hash = Types::Hash::default();
             let recv = ProcessorSessionRecv {
                 sessions: self.sessions.clone(),
                 state: self.state.clone()
@@ -351,7 +350,7 @@ where
 
             Ok((local_shutdown, msgs, recv))
         } else {
-            Err(ProcessorSessionDispatchError::Unknown { prin: prin })
+            Err(ProcessorSessionDispatchError::Unknown { prin: prin.clone() })
         }
     }
 }

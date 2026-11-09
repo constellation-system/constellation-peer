@@ -16,6 +16,7 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
+use std::convert::Infallible;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::convert::TryFrom;
@@ -33,6 +34,7 @@ use clap::ArgMatches;
 use constellation_auth::authn::PassthruMsgAuthN;
 use constellation_auth::config::TestCredConfig;
 use constellation_channels::config::CompoundFarEndpoint;
+use constellation_channels::config::ThreadedNSNameCachesConfig;
 use constellation_channels::far::compound::CompoundFarChannel;
 use constellation_channels::far::compound::CompoundFarChannelXfrm;
 use constellation_channels::far::udp::UDPDatagramXfrm;
@@ -41,23 +43,25 @@ use constellation_channels::far::FarChannelCreate;
 use constellation_channels::resolve::cache::NSNameCachesCtx;
 use constellation_channels::resolve::cache::ThreadedNSNameCaches;
 use constellation_common::config::Create;
+use constellation_common::error::MutexPoison;
+use constellation_common::error::WithMutexPoison;
 use constellation_common::hashid::SHA3Algo;
 use constellation_common::hashid::SHA3ID;
 use constellation_common::ids::AscendingCount;
 use constellation_common::net::DatagramXfrmCreate;
 use constellation_common::net::IPEndpointAddr;
 use constellation_common::shutdown::ShutdownFlag;
+use constellation_common::sync::Notify;
 use constellation_common::version::FullVersion;
 use constellation_common::version::Version;
 use constellation_common::version::VersionSuffix;
-use constellation_component_common::bus::dispatch::DispatchBus;
-use constellation_component_common::bus::dispatch::DispatchBusCleanup;
-use constellation_component_common::bus::dispatch::DispatchBusTypes;
-use constellation_component_common::bus::multicast::MulticastBus;
-use constellation_component_common::bus::multicast::MulticastBusCleanup;
-use constellation_component_common::bus::multicast::MulticastBusTypes;
-use constellation_component_common::config::DispatchLargeObjBusConfig;
-use constellation_component_common::config::MulticastLargeObjBusConfig;
+use constellation_component_common::bus::dispatch::DispatchLargeObjBus;
+use constellation_component_common::bus::dispatch::DispatchLargeObjBusStarter;
+use constellation_component_common::bus::multicast::MulticastLargeObjBus;
+use constellation_component_common::bus::multicast::MulticastLargeObjBusCreateError;
+use constellation_component_common::bus::multicast::MulticastLargeObjBusStarter;
+use constellation_component_common::bus::types::MulticastLargeObjBusTypes;
+use constellation_component_common::bus::types::DispatchLargeObjBusTypes;
 use constellation_component_common::config::PartiesConfig;
 use constellation_component_common::consensus_ctl::ConsensusCtl;
 use constellation_component_common::xact::XactBatchBlobCodec;
@@ -79,6 +83,7 @@ use uuid::Uuid;
 
 use crate::clients::ClientSessionDispatch;
 use crate::config::PeerStateConfig;
+use crate::config::PeerConfig;
 use crate::config::ProcessorClassesConfig;
 #[cfg(feature = "standalone")]
 use crate::config::StandaloneConfig;
@@ -89,47 +94,94 @@ use crate::state::InstanceEntry;
 use crate::state::PeerState;
 use crate::state::ProcessorEntry;
 use crate::state::ProcessorIdx;
+use crate::types::ConsensusMsgTypes;
 
 pub trait PeerComponentTypes {
-    type Ctx: 'static + Send;
+    type Ctx: 'static + Clone + NSNameCachesCtx + Send;
     type Addr: Clone + Debug + Display + Eq + Hash + Send;
 
-    type ClientPrin: Clone + Display + Eq + Hash;
-    type ClientChansConfig;
-    type ClientEpochsConfig: Default;
-    type ClientMsgAuthConfig;
-    type ClientCreateError: Debug + Display;
-    type ClientBusTypes: DispatchBusTypes<
+    type ClientsPrin: Clone + Display + Eq + Hash + Send;
+    type ClientsSessAuthConfig: Clone + Send;
+    type ClientsMsgAuthConfig;
+    type ClientsLargeObjMsgAuthConfig: Send;
+    type ClientsHashConfig: Default;
+    type ClientsIDsConfig: Default;
+    type ClientsUDPConfig: Clone + Default + Send;
+    type ClientsUnixConfig: Clone + Default + Send;
+    type ClientsEpochsConfig: Default;
+    type ClientsCreateError: Debug + Display + Send;
+    type ClientsBusTypes: 'static + DispatchLargeObjBusTypes<
         Self::Ctx,
-        ChansConfig = Self::ClientChansConfig,
-        EpochsConfig = Self::ClientEpochsConfig,
-        MsgAuthConfig = Self::ClientMsgAuthConfig,
-    > + Create<CreateError = Self::ClientCreateError>;
-
-    type ProcessorPrin: Clone + Display + Eq + Hash;
-    type ProcessorChansConfig;
-    type ProcessorEpochsConfig: Default;
-    type ProcessorMsgAuthConfig;
-    type ProcessorCreateError: Debug + Display;
-    type ProcessorBusTypes: DispatchBusTypes<
+        HashConfig = Self::ClientsHashConfig,
+        EpochsConfig = Self::ClientsEpochsConfig,
+        EncoderConfig = (),
+        DecoderConfig = (),
+        IDsConfig = Self::ClientsIDsConfig,
+        UDPConfig = Self::ClientsUDPConfig,
+        UnixConfig = Self::ClientsUnixConfig,
+        SessionAuthConfig = Self::ClientsSessAuthConfig,
+        MsgAuthConfig = Self::ClientsMsgAuthConfig,
+        LargeObjMsgAuthConfig = Self::ClientsLargeObjMsgAuthConfig
+    > + Create<CreateError = Self::ClientsCreateError>;
+    type ProcessorsPrin: Clone + Display + Eq + Hash + Send;
+    type ProcessorsSessAuthConfig: Clone + Send;
+    type ProcessorsMsgAuthConfig;
+    type ProcessorsLargeObjMsgAuthConfig: Send;
+    type ProcessorsHashConfig: Default;
+    type ProcessorsIDsConfig: Default;
+    type ProcessorsUDPConfig: Clone + Default + Send;
+    type ProcessorsUnixConfig: Clone + Default + Send;
+    type ProcessorsEpochsConfig: Default;
+    type ProcessorsCreateError: Debug + Display;
+    type ProcessorsBusTypes: 'static + DispatchLargeObjBusTypes<
         Self::Ctx,
-        ChansConfig = Self::ProcessorChansConfig,
-        EpochsConfig = Self::ProcessorEpochsConfig,
-        MsgAuthConfig = Self::ProcessorMsgAuthConfig,
-    > + Create<CreateError = Self::ProcessorCreateError>;
-
-    type ConsensusPrin: Clone + Display + Eq + Hash;
-    type ConsensusEpochsConfig: Default;
-    type ConsensusMsgAuthConfig;
-    type ConsensusChansConfig;
+        HashConfig = Self::ProcessorsHashConfig,
+        EpochsConfig = Self::ProcessorsEpochsConfig,
+        EncoderConfig = (),
+        DecoderConfig = (),
+        IDsConfig = Self::ProcessorsIDsConfig,
+        UDPConfig = Self::ProcessorsUDPConfig,
+        UnixConfig = Self::ProcessorsUnixConfig,
+        MsgAuthConfig = Self::ProcessorsMsgAuthConfig,
+        SessionAuthConfig = Self::ProcessorsSessAuthConfig,
+        LargeObjMsgAuthConfig = Self::ProcessorsLargeObjMsgAuthConfig,
+    > + Create<CreateError = Self::ProcessorsCreateError>;
+    type ConsensusPrin: Clone + Display + Eq + Hash + Send + Sync;
+    type ConsensusMsgTypes: ConsensusMsgTypes<Prin = Self::ConsensusPrin>;
+    type ConsensusSessAuthConfig: Clone + Send;
+    type ConsensusMsgAuthConfig: Send;
+    type ConsensusMsgAuthCreateError: Debug + Display;
+    type ConsensusLargeObjMsgAuthConfig: Send;
+    type ConsensusHashConfig: Default;
+    type ConsensusHashCreateError: Debug + Display;
+    type ConsensusIDsConfig: Default;
+    type ConsensusIDsCreateError: Debug + Display;
+    type ConsensusUDPConfig: Clone + Default + Send;
+    type ConsensusUnixConfig: Clone + Default + Send;
+    type ConsensusEpochsConfig: Default + Send;
     type ConsensusCreateError: Debug + Display;
-    type ConsensusBusTypes: MulticastBusTypes<
+    type ConsensusBusTypes: 'static + MulticastLargeObjBusTypes<
         Self::Ctx,
-        Addr = Self::Addr,
-        ChansConfig = Self::ConsensusChansConfig,
+        SessionPrin = Self::ConsensusPrin,
+        Msgs = ConsensusMsgs<Self::ConsensusMsgTypes>,
+        Recv = ConsensusRecv<Self::ConsensusMsgTypes>,
+        HashConfig = Self::ConsensusHashConfig,
         EpochsConfig = Self::ConsensusEpochsConfig,
+        EncoderConfig = (),
+        DecoderConfig = (),
+        IDsConfig = Self::ConsensusIDsConfig,
+        ResolverConfig = ThreadedNSNameCachesConfig,
+        UDPConfig = Self::ConsensusUDPConfig,
+        UnixConfig = Self::ConsensusUnixConfig,
         MsgAuthConfig = Self::ConsensusMsgAuthConfig,
-    > + Create<CreateError = Self::ConsensusCreateError>;
+        SessionAuthConfig = Self::ConsensusSessAuthConfig,
+        LargeObjMsgAuthConfig = Self::ConsensusLargeObjMsgAuthConfig,
+        HashCreateError = Self::ConsensusHashCreateError,
+        MsgAuthCreateError = Self::ConsensusMsgAuthCreateError,
+        EncoderCreateError = Infallible,
+        DecoderCreateError = Infallible,
+        IDsCreateError = Self::ConsensusIDsCreateError,
+    > + Create<CreateError = Self::ConsensusCreateError> + Send;
 }
 
 // XXX this is going to need separate session authenticators, and
@@ -137,39 +189,37 @@ pub trait PeerComponentTypes {
 // is best done with type traits, when we get to that.
 pub struct PeerComponent<Types>
 where Types: PeerComponentTypes {
-    client_comm_config: DispatchLargeObjBusConfig<
-        Types::ClientChansConfig,
-        Types::ClientEpochsConfig,
-        Types::ClientMsgAuthConfig
-    >,
-    processor_comm_config: DispatchLargeObjBusConfig<
-        Types::ProcessorChansConfig,
-        Types::ProcessorEpochsConfig,
-        Types::ProcessorMsgAuthConfig
-    >,
-    consensus_comm_config: MulticastLargeObjBusConfig<
-        Types::ConsensusChansConfig,
-        Types::ConsensusEpochsConfig,
-        Types::ConsensusPrin,
-        Types::ConsensusMsgAuthConfig,
-        Types::Addr
-    >,
+    clients_bus: DispatchLargeObjBusStarter<Types::ClientsBusTypes, Types::Ctx>,
+    processors_bus: DispatchLargeObjBusStarter<Types::ProcessorsBusTypes, Types::Ctx>,
+    consensus_bus: MulticastLargeObjBusStarter<Types::ConsensusBusTypes, Types::Ctx>,
     peer_state_config: PeerStateConfig,
-    processor_ids: HashMap<Types::ProcessorPrin, ProcessorIdx>,
+    processor_ids: HashMap<Types::ProcessorsPrin, ProcessorIdx>,
     processors: HashMap<Uuid, ProcessorEntry>,
-    shutdown: ShutdownFlag,
-    consensus_ctx: Types::Ctx,
-    processors_ctx: Types::Ctx,
-    client_ctx: Types::Ctx
+    processors_notify: Notify,
+    consensus_notify: Notify,
+    clients_notify: Notify
 }
 
-pub struct PeerComponentCleanup {
+pub struct PeerComponentCleanup<Types>
+where Types: PeerComponentTypes {
     shutdown: ShutdownFlag,
-    consensus_comm_cleanup: MulticastBusCleanup,
-    processor_comm_cleanup: DispatchBusCleanup,
-    client_comm_cleanup: DispatchBusCleanup
+    consensus_bus_cleanup: Option<MulticastLargeObjBus<Types::ConsensusBusTypes, Types::Ctx>>,
+    processors_bus_cleanup: Option<DispatchLargeObjBus<Types::ProcessorsBusTypes, Types::Ctx>>,
+    clients_bus_cleanup: Option<DispatchLargeObjBus<Types::ClientsBusTypes, Types::Ctx>>
 }
 
+#[derive(Debug)]
+pub enum PeerComponentCreateError {
+    IO {
+        err: std::io::Error
+    },
+    Duplicate {
+        class: Uuid,
+        instance: usize
+    }
+}
+
+#[derive(Debug)]
 pub enum PeerComponentRunError<Processor, Client, Consensus> {
     ProcessorComm {
         err: Processor
@@ -194,102 +244,289 @@ pub enum PeerComponentRunError<Processor, Client, Consensus> {
 impl<Types> PeerComponent<Types>
 where Types: PeerComponentTypes
 {
+    pub fn create(
+        config: PeerConfig<
+            Types::ClientsHashConfig,
+            Types::ClientsSessAuthConfig,
+            Types::ClientsMsgAuthConfig,
+            Types::ClientsLargeObjMsgAuthConfig,
+            Types::ClientsUnixConfig,
+            Types::ClientsUDPConfig,
+            Types::ClientsIDsConfig,
+            Types::ClientsEpochsConfig,
+            Types::ProcessorsPrin,
+            Types::ProcessorsHashConfig,
+            Types::ProcessorsSessAuthConfig,
+            Types::ProcessorsMsgAuthConfig,
+            Types::ProcessorsLargeObjMsgAuthConfig,
+            Types::ProcessorsUnixConfig,
+            Types::ProcessorsUDPConfig,
+            Types::ProcessorsIDsConfig,
+            Types::ProcessorsEpochsConfig,
+            Types::ConsensusPrin,
+            Types::ConsensusHashConfig,
+            Types::ConsensusSessAuthConfig,
+            Types::ConsensusLargeObjMsgAuthConfig,
+            Types::ConsensusUnixConfig,
+            Types::ConsensusUDPConfig,
+            Types::ConsensusIDsConfig,
+            Types::ConsensusEpochsConfig,
+            Types::ConsensusMsgAuthConfig
+        >,
+        ctx: Types::Ctx,
+        _shutdown: &ShutdownFlag
+    ) -> Result<Self, PeerComponentCreateError> {
+        let (
+            clients_config,
+            processors_config,
+            consensus_config,
+            peer_state_config
+        ) = config.take();
+        let (processors_bus_config, classes_config) = processors_config.take();
+        let (processors_bus, processors_notify) =
+            DispatchLargeObjBusStarter::create(processors_bus_config, ctx.clone())
+                .map_err(|err| PeerComponentCreateError::IO {
+                    err: err
+                })?;
+        let clients_bus_config = clients_config.take();
+        let (clients_bus, clients_notify) = DispatchLargeObjBusStarter::create(
+            clients_bus_config,
+            ctx.clone()
+        )
+            .map_err(|err| PeerComponentCreateError::IO {
+                err: err
+            })?;
+        let consensus_bus_config = consensus_config.take();
+        let (consensus_bus, consensus_notify) =
+            MulticastLargeObjBusStarter::create(consensus_bus_config,
+                                                ctx.clone())
+                .map_err(|err| PeerComponentCreateError::IO {
+                    err: err
+                })?;
+        let ProcessorClassesConfig::Static {
+            stat: processor_configs
+        } = classes_config;
+        let mut processor_ids: HashMap<Types::ProcessorsPrin, ProcessorIdx> =
+            HashMap::with_capacity(processor_configs.len());
+        let mut classes = HashMap::with_capacity(processor_configs.len());
+        let mut curr_id = 0;
+
+        // Build the configuration structure for processors.
+        for processor_config in processor_configs {
+            let (prin, class_configs) = processor_config.take();
+            let id = match processor_ids.get(&prin) {
+                Some(id) => id.clone(),
+                None => {
+                    let idx = ProcessorIdx::from(curr_id);
+
+                    curr_id += 1;
+                    processor_ids.insert(prin, idx.clone());
+
+                    idx
+                }
+            };
+
+            for class_config in class_configs {
+                let (class, instances, versions) = class_config.take();
+                let versions = versions.into_iter().map(|config| config.into());
+                let class: Uuid = class.into();
+                let instance = InstanceEntry::new(id.clone(), versions);
+
+                match classes.entry(class) {
+                    Entry::Vacant(ent) => {
+                        let ent = ent.insert(HashMap::new());
+
+                        for i in instances {
+                            ent.insert(i as u64, instance.clone());
+                        }
+                    }
+                    Entry::Occupied(mut ent) => {
+                        for i in instances {
+                            if ent
+                                .get_mut()
+                                .insert(i as u64, instance.clone())
+                                .is_some()
+                            {
+                                return Err(PeerComponentCreateError::Duplicate {
+                                    instance: i,
+                                    class: class
+                                })
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let processors = classes
+            .into_iter()
+            .map(|(class, mut instances)| {
+                instances.shrink_to_fit();
+
+                (class, ProcessorEntry::new(instances))
+            })
+            .collect();
+
+        Ok(PeerComponent {
+            clients_bus: clients_bus,
+            processors_bus: processors_bus,
+            consensus_bus: consensus_bus,
+            peer_state_config: peer_state_config,
+            processor_ids: processor_ids,
+            processors: processors,
+            processors_notify: processors_notify,
+            consensus_notify: consensus_notify,
+            clients_notify: clients_notify,
+        })
+    }
+
     pub fn start(
-        self
+        self,
+        shutdown: ShutdownFlag
     ) -> Result<
-        PeerComponentCleanup,
-        PeerComponentRunError<
-            Types::ProcessorCreateError,
-            Types::ClientCreateError,
-            Types::ConsensusCreateError
-        >
+        PeerComponentCleanup<Types>,
+        (PeerComponentCleanup<Types>,
+         PeerComponentRunError<
+             WithMutexPoison<std::io::Error>,
+             WithMutexPoison<std::io::Error>,
+             MulticastLargeObjBusCreateError<
+                 Types::ConsensusHashCreateError,
+                 Types::ConsensusMsgAuthCreateError,
+                 LargeObjProtoCreateError<
+                     Infallible,
+                     Infallible,
+                     Types::ConsensusIDsCreateError
+                 >,
+                 MutexPoison
+             >
+         >)
     >{
         let PeerComponent {
-            client_comm_config,
-            processor_comm_config,
-            consensus_comm_config,
+            clients_bus,
+            processors_bus,
+            consensus_bus,
             peer_state_config,
             processor_ids,
             processors,
-            shutdown,
-            consensus_ctx,
-            processors_ctx,
-            client_ctx
+            processors_notify,
+            consensus_notify,
+            clients_notify
         } = self;
 
         info!(target: "peer-component",
               "starting peer component");
 
-        let state = Arc::new(PeerState::new(peer_state_config, processors));
+        let state = PeerState::new(
+            peer_state_config,
+            processors,
+            consensus_notify,
+            processors_notify,
+            clients_notify
+        );
+        let state = Arc::new(state);
         let processor_dispatch = ProcessorSessionDispatch::new(
             processor_ids,
             state.clone()
         );
-        let processor_comm: DispatchBus<Types::ProcessorBusTypes, Types::Ctx> =
-            DispatchBus::create(
-                processor_comm_config,
-                processor_dispatch,
-                processors_ctx
-            )
-            .map_err(|err| PeerComponentRunError::ProcessorComm { err: err })?;
         let client_dispatch = ClientSessionDispatch::new(state.clone());
-        let client_comm: DispatchBus<Types::ClientBusTypes, Types::Ctx> =
-            DispatchBus::create(
-                client_comm_config,
-                client_dispatch,
-                client_ctx
-            )
-            .map_err(|err| PeerComponentRunError::ClientComm { err: err })?;
         let consensus_recv = ConsensusRecv::new(state.clone());
         let consensus_msgs = ConsensusMsgs::new(state.clone());
-        let consensus_notify = state.notify();
-        let consensus_comm: MulticastBus<Types::ConsensusBusTypes, Types::Ctx> =
-            MulticastBus::create(
-                consensus_comm_config,
-                consensus_ctx,
-                consensus_recv,
-                consensus_msgs
-            )
-            .map_err(|err| PeerComponentRunError::ConsensusComm { err: err })?;
 
-        let consensus_comm_cleanup = consensus_comm.start().map_err(|err| {
-            PeerComponentRunError::ConsensusStart { err: err }
-        })?;
+        match processors_bus.start(processor_dispatch, shutdown.clone()) {
+            Ok(processors_bus) => match clients_bus.start(client_dispatch, shutdown.clone()) {
+                Ok(clients_bus) => match consensus_bus.start(
+                    consensus_recv,
+                    consensus_msgs,
+                    shutdown
+                ) {
+                    Ok((consensus_bus, _)) => Ok(PeerComponentCleanup {
+                        consensus_bus_cleanup: Some(consensus_bus),
+                        processors_bus_cleanup: Some(processors_bus),
+                        clients_bus_cleanup: Some(clients_bus),
+                        shutdown: shutdown
+                    }),
+                    Err(err) => {
+                        let cleanup = PeerComponentCleanup {
+                            consensus_bus_cleanup: None,
+                            processors_bus_cleanup: Some(processors_bus),
+                            clients_bus_cleanup: Some(clients_bus),
+                            shutdown: shutdown
+                        };
+                        let err = PeerComponentRunError::ConsensusComm {
+                            err: err
+                        };
 
-        // XXX this doesn't clean up properly if consensus uplink
-        // fails to start.
-        let processor_comm_cleanup = processor_comm.start().map_err(|err| {
-            PeerComponentRunError::ProcessorStart { err: err }
-        })?;
+                        Err((cleanup, err))
+                    }
+                }
+                Err(err) => {
+                    let cleanup = PeerComponentCleanup {
+                        consensus_bus_cleanup: None,
+                        processors_bus_cleanup: Some(processors_bus),
+                        clients_bus_cleanup: None,
+                        shutdown: shutdown
+                    };
+                    let err = PeerComponentRunError::ClientComm { err: err };
 
-        let client_comm_cleanup = client_comm
-            .start()
-            .map_err(|err| PeerComponentRunError::ClientStart { err: err })?;
+                    Err((cleanup, err))
+                }
+            }
+            Err(err) => {
+                let cleanup = PeerComponentCleanup {
+                    consensus_bus_cleanup: None,
+                    processors_bus_cleanup: None,
+                    clients_bus_cleanup: None,
+                    shutdown: shutdown
+                };
+                let err = PeerComponentRunError::ProcessorComm { err: err };
 
-        Ok(PeerComponentCleanup {
-            consensus_comm_cleanup: consensus_comm_cleanup,
-            processor_comm_cleanup: processor_comm_cleanup,
-            client_comm_cleanup: client_comm_cleanup,
-            shutdown: shutdown
-        })
+                Err((cleanup, err))
+            }
+        }
     }
 }
 
-impl PeerComponentCleanup {
+impl<Types> PeerComponentCleanup<Types>
+where Types: PeerComponentTypes
+{
     pub fn cleanup(self) {
         let PeerComponentCleanup {
-            client_comm_cleanup,
-            processor_comm_cleanup,
-            consensus_comm_cleanup,
-            mut shutdown
+            clients_bus_cleanup,
+            processors_bus_cleanup,
+            consensus_bus_cleanup,
+            ..
         } = self;
 
-        shutdown.set();
-        client_comm_cleanup.cleanup();
-        processor_comm_cleanup.cleanup();
-        consensus_comm_cleanup.cleanup();
+        if let Some(clients_bus_cleanup) = clients_bus_cleanup {
+            clients_bus_cleanup.cleanup();
+        }
+
+        if let Some(processors_bus_cleanup) = processors_bus_cleanup {
+            processors_bus_cleanup.cleanup();
+        }
+
+        if let Some(consensus_bus_cleanup) = consensus_bus_cleanup {
+            consensus_bus_cleanup.cleanup();
+        }
     }
 }
+
+
+impl Display for PeerComponentCreateError {
+    #[inline]
+    fn fmt(
+        &self,
+        f: &mut Formatter<'_>
+    ) -> Result<(), Error> {
+        match self {
+            PeerComponentCreateError::IO { err } => write!(f, "{}", err),
+            PeerComponentCreateError::Duplicate { class, instance } =>
+                write!(f, "duplicate processor for class {}, instance {}",
+                       class, instance)
+        }
+    }
+}
+
 /*
 #[cfg(feature = "standalone")]
 pub type StandaloneRegistry = CompoundFarChannelRegistry<
