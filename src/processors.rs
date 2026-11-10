@@ -51,31 +51,30 @@ use log::warn;
 
 use crate::state::PeerState;
 use crate::state::ProcessorIdx;
+use crate::types::ClientsMsgTypes;
 use crate::state::ConsensusRoundID;
-use crate::types::ProcessorMsgTypes;
+use crate::types::ProcessorsMsgTypes;
 use crate::types::ProcessorSessionDispatchTypes;
-use crate::types::LargeObjSessionTypes;
-use crate::types::SealTypes;
 
 pub(crate) struct ProcessorSessionDispatch<Types>
-where Types: LargeObjSessionTypes {
-    sessions: Arc<Mutex<HashMap<Types::Prin, ProcessorSession>>>,
+where Types: ProcessorsMsgTypes + ClientsMsgTypes {
+    sessions: Arc<Mutex<HashMap<Types::ProcessorsPrin, ProcessorSession>>>,
     state: Arc<PeerState<Types>>,
-    processors: HashMap<Types::Prin, ProcessorIdx>
+    processors: HashMap<Types::ProcessorsPrin, ProcessorIdx>
 }
 
 #[derive(Clone)]
 pub(crate) struct ProcessorSessionRecv<Types>
 where
-    Types: SealTypes {
+    Types: ProcessorsMsgTypes + ClientsMsgTypes {
     state: Arc<PeerState<Types>>,
-    sessions: Arc<Mutex<HashMap<Types::Prin, ProcessorSession>>>
+    sessions: Arc<Mutex<HashMap<Types::ProcessorsPrin, ProcessorSession>>>
 }
 
 #[derive(Clone)]
 pub(crate) struct ProcessorSessionMsgs<Types>
 where
-    Types: SealTypes {
+    Types: ClientsMsgTypes {
     state: Arc<PeerState<Types>>,
     idx: ProcessorIdx
 }
@@ -104,12 +103,12 @@ pub(crate) enum ProcessorSessionRecvError<Prin> {
     MutexPoison
 }
 
-impl<Types> LargeObjMsgs<Types::Hash,
-                         XactBlobBatch<ConsensusRoundID, Types::HashID,
-                                       Types::Seal>>
+impl<Types> LargeObjMsgs<Types::ConsensusHash,
+                         XactBlobBatch<ConsensusRoundID, Types::ConsensusHashID,
+                                       Types::ConsensusSeal>>
     for ProcessorSessionMsgs<Types>
 where
-    Types: SealTypes {
+    Types: ProcessorsMsgTypes + ClientsMsgTypes {
     type AddMsgsError<Encode>
         = WithMutexPoison<LargeObjProtoAddOutboundError<Encode>>
     where
@@ -118,16 +117,19 @@ where
     fn add_msgs<WrapperCodec, F>(
         &mut self,
         sender: &mut LargeObjSender<
-            Types::Hash,
-            XactBlobBatch<ConsensusRoundID, Types::HashID, Types::Seal>,
+            Types::ConsensusHash,
+            XactBlobBatch<ConsensusRoundID,
+                          Types::ConsensusHashID,
+                          Types::ConsensusSeal>,
             WrapperCodec,
             F
         >
     ) -> Result<Option<Instant>, Self::AddMsgsError<WrapperCodec::EncodeError>>
     where
         WrapperCodec: Clone + Create
-            + Encoder<XactBlobBatch<ConsensusRoundID, Types::HashID,
-                                    Types::Seal>>,
+        + Encoder<XactBlobBatch<ConsensusRoundID,
+                                Types::ConsensusHashID,
+                                Types::ConsensusSeal>>,
         WrapperCodec::Config: Default,
         F: Frags {
         let (committed, reqs, next) =
@@ -170,18 +172,18 @@ impl Drop for ProcessorSession {
 }
 
 impl<Types> AuthNMsgRecv<
-    Types::Prin,
-    Types::ProcessorAuthMsg
+    Types::ProcessorsPrin,
+    Types::ProcessorsAuthMsg
 > for ProcessorSessionRecv<Types>
 where
-    Types: ProcessorMsgTypes {
+    Types: ProcessorsMsgTypes + ClientsMsgTypes {
     /// Errors that can occur reporting messages.
-    type RecvError = ProcessorSessionRecvError<Types::Prin>;
+    type RecvError = ProcessorSessionRecvError<Types::ProcessorsPrin>;
 
     /// Receive an authenticated message.
     fn recv_auth_msg(
         &mut self,
-        msg: Types::ProcessorAuthMsg
+        msg: Types::ProcessorsAuthMsg
     ) -> Result<(), Self::RecvError> {
         let (prin, msg) = msg.take();
 
@@ -276,9 +278,9 @@ where
 
 impl<Types> ProcessorSessionDispatch<Types>
 where
-    Types: LargeObjSessionTypes {
+    Types: ProcessorsMsgTypes + ClientsMsgTypes {
     pub(crate) fn new(
-        processors: HashMap<Types::Prin, ProcessorIdx>,
+        processors: HashMap<Types::ProcessorsPrin, ProcessorIdx>,
         state: Arc<PeerState<Types>>
     ) -> Self {
         let sessions = Arc::new(Mutex::new(HashMap::new()));
@@ -294,18 +296,22 @@ where
 impl<Types> SessionDispatch<Types::ProcessorSessionDispTypes>
     for ProcessorSessionDispatch<Types>
 where
-    Types: ProcessorSessionDispatchTypes
+    Types: ProcessorSessionDispatchTypes + ClientsMsgTypes
 {
     type SessionError = ProcessorSessionDispatchError<
-        Types::Prin,
-        <XactBatchBlobCodec<u128, Types::Hash, Types::Seal, Types::SealCodec> as Create>::CreateError,
-        <XactBatchBlobCodec<u128, Types::Hash, Types::Seal, Types::SealCodec> as Create>::CreateError,
-        Types::IDsCreateError
+        Types::ProcessorsPrin,
+        <XactBatchBlobCodec<u128, Types::ConsensusHash,
+                            Types::ConsensusSeal,
+                            Types::ConsensusSealCodec> as Create>::CreateError,
+        <XactBatchBlobCodec<u128, Types::ConsensusHash,
+                            Types::ConsensusSeal,
+                            Types::ConsensusSealCodec> as Create>::CreateError,
+        Types::ConsensusIDsCreateError
     >;
 
     fn session(
         &self,
-        prin: &Types::Prin,
+        prin: &Types::ProcessorsPrin,
         _shutdown: ShutdownFlag,
         _notify: NotifyFlag
     ) -> Result<

@@ -16,97 +16,189 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
+use std::convert::Infallible;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::hash::Hash;
 
 use constellation_auth::authn::AuthNedDestruct;
+use constellation_channels::config::ThreadedNSNameCachesConfig;
+use constellation_channels::resolve::cache::NSNameCachesCtx;
 use constellation_common::config::Create;
 use constellation_common::codec::Decoder;
 use constellation_common::codec::Encoder;
 use constellation_common::error::ScopedError;
 use constellation_common::hashid::HashAlgo;
 use constellation_common::hashid::HashID;
+use constellation_component_common::bus::types::DispatchLargeObjBusTypes;
+use constellation_component_common::bus::types::MulticastLargeObjBusTypes;
 use constellation_component_common::bus::types::SessionDispatchTypes;
 use constellation_component_common::consensus_ctl::ConsensusCtl;
 use constellation_component_common::xact::XactBlobBatch;
-use constellation_streams::large_obj::LargeObjID;
 
 use crate::state::ConsensusRoundID;
 use crate::clients::ClientSessionMsgs;
 use crate::clients::ClientSessionRecv;
+use crate::consensus::ConsensusMsgs;
+use crate::consensus::ConsensusRecv;
 use crate::processors::ProcessorSessionMsgs;
 use crate::processors::ProcessorSessionRecv;
 
-pub trait SealTypes {
-    type Prin: Clone + Debug + Display + Eq + Hash + Send + Sync;
-    type Seal: Clone + Send;
-    type SealCodecConfig: Clone + Default;
-    type SealCreateError: Debug + Display + ScopedError;
-    type SealCodec: Decoder<Self::Seal> + Encoder<Self::Seal>
-        + Create<Config = Self::SealCodecConfig,
-                 CreateError = Self::SealCreateError>;
-    type HashID: Clone + Display + Hash + HashID + Eq + Send;
-    type Hash: Clone + Default + HashAlgo<HashID = Self::HashID> + Send;
+pub trait ConsensusBaseTypes {
+    type ConsensusPrin: Clone + Debug + Display + Eq + Hash + Send + Sync;
+    type ConsensusSeal: Clone + Send;
+    type ConsensusSealCodecConfig: Clone + Default;
+    type ConsensusSealCreateError: Debug + Display + ScopedError;
+    type ConsensusSealCodec: Decoder<Self::ConsensusSeal>
+        + Encoder<Self::ConsensusSeal>
+        + Create<Config = Self::ConsensusSealCodecConfig,
+                 CreateError = Self::ConsensusSealCreateError> + Send;
+    type ConsensusHashID: Clone + Debug + Display + Hash + HashID + Eq + Send;
+    type ConsensusHash: Clone + Default
+        + HashAlgo<HashID = Self::ConsensusHashID> + Send;
+    type ConsensusIDsCreateError: Debug + Display + ScopedError;
 }
 
-pub trait LargeObjSessionTypes: SealTypes {
-    type IDsConfig: Clone  + Default;
-    type IDsCreateError: Debug + Display + ScopedError;
-    type IDs: Iterator<Item = LargeObjID>
-        + Create<Config = Self::IDsConfig,
-                 CreateError = Self::IDsCreateError> + Send;
-}
-
-pub trait ConsensusMsgTypes: LargeObjSessionTypes {
+pub trait ConsensusMsgTypes: ConsensusBaseTypes {
     type ConsensusAuthMsg: AuthNedDestruct<
-        Self::Prin,
-        ConsensusCtl<ConsensusRoundID, Self::HashID, Self::Seal>
+        Self::ConsensusPrin,
+        ConsensusCtl<ConsensusRoundID, Self::ConsensusHashID,
+                     Self::ConsensusSeal>
     >;
-    type ConsensusCodecConfig: Clone + Default;
-    type ConsensusCodecCreateError: Debug + Display + ScopedError;
-    type ConsensusCodec: Clone
-        + Create<Config = Self::ConsensusCodecConfig>
-        + Decoder<ConsensusCtl<ConsensusRoundID, Self::HashID, Self::Seal>>
-        + Encoder<ConsensusCtl<ConsensusRoundID, Self::HashID, Self::Seal>>;
 }
 
-pub trait ClientMsgTypes: LargeObjSessionTypes {
-    type ClientAuthMsg: AuthNedDestruct<
-        Self::Prin,
-        XactBlobBatch<ConsensusRoundID, Self::HashID, Self::Seal>,
+pub trait ClientsMsgTypes: ConsensusBaseTypes {
+    type ClientsPrin: Clone + Debug + Display + Eq + Hash + Send + Sync;
+    type ClientsAuthMsg: AuthNedDestruct<
+        Self::ClientsPrin,
+        XactBlobBatch<ConsensusRoundID,
+                      Self::ConsensusHashID,
+                      Self::ConsensusSeal>,
     >;
-    type ClientCodecCreateError: Debug + Display + ScopedError;
-    type ClientCodec: Clone
-        + Create<CreateError = Self::ClientCodecCreateError>
-        + Decoder<XactBlobBatch<ConsensusRoundID, Self::HashID, Self::Seal>>
-        + Encoder<XactBlobBatch<ConsensusRoundID, Self::HashID, Self::Seal>>;
 }
 
-pub trait ClientSessionDispatchTypes: ClientMsgTypes + Sized {
-    type ClientSessionDispTypes: SessionDispatchTypes<
-        SessionPrin = Self::Prin,
+pub trait ClientsSessionDispatchTypes: ClientsMsgTypes + Sized {
+    type ClientsSessionDispTypes: SessionDispatchTypes<
+        SessionPrin = Self::ClientsPrin,
         Recv = ClientSessionRecv<Self>,
         Msgs = ClientSessionMsgs<Self>
     >;
 }
 
-pub trait ProcessorMsgTypes: LargeObjSessionTypes {
-    type ProcessorAuthMsg: AuthNedDestruct<
-        Self::Prin,
-        XactBlobBatch<ConsensusRoundID, Self::HashID, Self::Seal>,
+pub trait ProcessorsMsgTypes: ConsensusBaseTypes {
+    type ProcessorsPrin: Clone + Debug + Display + Eq + Hash + Send + Sync;
+    type ProcessorsAuthMsg: AuthNedDestruct<
+        Self::ProcessorsPrin,
+        XactBlobBatch<ConsensusRoundID,
+                      Self::ConsensusHashID,
+                      Self::ConsensusSeal>,
     >;
-    type ProcessorCodecCreateError: Debug + Display + ScopedError;
-    type ProcessorCodec: Clone
+    type ProcessorsCodecCreateError: Debug + Display + ScopedError;
+    type ProcessorsCodec: Clone
         + Create
-        + Decoder<XactBlobBatch<ConsensusRoundID, Self::HashID, Self::Seal>>
-        + Encoder<XactBlobBatch<ConsensusRoundID, Self::HashID, Self::Seal>>;
+        + Decoder<XactBlobBatch<ConsensusRoundID,
+                                Self::ConsensusHashID,
+                                Self::ConsensusSeal>>
+        + Encoder<XactBlobBatch<ConsensusRoundID,
+                                Self::ConsensusHashID,
+                                Self::ConsensusSeal>>;
 }
 
-pub trait ProcessorSessionDispatchTypes: ProcessorMsgTypes + Sized {
+pub trait ProcessorSessionDispatchTypes: ClientsMsgTypes
+    + ProcessorsMsgTypes + Sized {
     type ProcessorSessionDispTypes: SessionDispatchTypes<
-        SessionPrin = Self::Prin,
+        SessionPrin = Self::ProcessorsPrin,
         Recv = ProcessorSessionRecv<Self>,
         Msgs = ProcessorSessionMsgs<Self>
     >;
+}
+
+pub trait PeerComponentTypes: ConsensusMsgTypes
+    + ClientsSessionDispatchTypes
+    + ProcessorSessionDispatchTypes
+    + Sized {
+    type Ctx: 'static + Clone + NSNameCachesCtx + Send;
+    type Addr: Clone + Debug + Display + Eq + Hash + Send;
+
+    type ClientsSessAuthConfig: Clone + Send;
+    type ClientsMsgAuthConfig;
+    type ClientsLargeObjMsgAuthConfig: Send;
+    type ClientsHashConfig: Default;
+    type ClientsIDsConfig: Default;
+    type ClientsUDPConfig: Clone + Default + Send;
+    type ClientsUnixConfig: Clone + Default + Send;
+    type ClientsEpochsConfig: Default;
+    type ClientsCreateError: Debug + Display + Send;
+    type ClientsBusTypes: 'static + DispatchLargeObjBusTypes<
+        Self::Ctx,
+        HashConfig = Self::ClientsHashConfig,
+        EpochsConfig = Self::ClientsEpochsConfig,
+        EncoderConfig = (),
+        DecoderConfig = (),
+        IDsConfig = Self::ClientsIDsConfig,
+        UDPConfig = Self::ClientsUDPConfig,
+        UnixConfig = Self::ClientsUnixConfig,
+        SessionAuthConfig = Self::ClientsSessAuthConfig,
+        MsgAuthConfig = Self::ClientsMsgAuthConfig,
+        LargeObjMsgAuthConfig = Self::ClientsLargeObjMsgAuthConfig,
+        DispTypes = Self::ClientsSessionDispTypes
+    > + Create<CreateError = Self::ClientsCreateError>;
+    type ProcessorsSessAuthConfig: Clone + Send;
+    type ProcessorsMsgAuthConfig;
+    type ProcessorsLargeObjMsgAuthConfig: Send;
+    type ProcessorsHashConfig: Default;
+    type ProcessorsIDsConfig: Default;
+    type ProcessorsUDPConfig: Clone + Default + Send;
+    type ProcessorsUnixConfig: Clone + Default + Send;
+    type ProcessorsEpochsConfig: Default;
+    type ProcessorsCreateError: Debug + Display;
+    type ProcessorsBusTypes: 'static + DispatchLargeObjBusTypes<
+        Self::Ctx,
+        HashConfig = Self::ProcessorsHashConfig,
+        EpochsConfig = Self::ProcessorsEpochsConfig,
+        EncoderConfig = (),
+        DecoderConfig = (),
+        IDsConfig = Self::ProcessorsIDsConfig,
+        UDPConfig = Self::ProcessorsUDPConfig,
+        UnixConfig = Self::ProcessorsUnixConfig,
+        MsgAuthConfig = Self::ProcessorsMsgAuthConfig,
+        SessionAuthConfig = Self::ProcessorsSessAuthConfig,
+        LargeObjMsgAuthConfig = Self::ProcessorsLargeObjMsgAuthConfig,
+        DispTypes = Self::ProcessorSessionDispTypes
+    > + Create<CreateError = Self::ProcessorsCreateError>;
+    type ConsensusSessAuthConfig: Clone + Send;
+    type ConsensusMsgAuthConfig: Send;
+    type ConsensusMsgAuthCreateError: Debug + Display;
+    type ConsensusLargeObjMsgAuthConfig: Send;
+    type ConsensusHashConfig: Default;
+    type ConsensusHashCreateError: Debug + Display;
+    type ConsensusIDsConfig: Default;
+    type ConsensusUDPConfig: Clone + Default + Send;
+    type ConsensusUnixConfig: Clone + Default + Send;
+    type ConsensusEpochsConfig: Default + Send;
+    type ConsensusCreateError: Debug + Display;
+    type ConsensusBusTypes: 'static + MulticastLargeObjBusTypes<
+        Self::Ctx,
+        SessionPrin = Self::ConsensusPrin,
+        Msgs = ConsensusMsgs<Self>,
+        Recv = ConsensusRecv<Self>,
+        Hash = Self::ConsensusHash,
+        HashID = Self::ConsensusHashID,
+        HashConfig = Self::ConsensusHashConfig,
+        EpochsConfig = Self::ConsensusEpochsConfig,
+        EncoderConfig = (),
+        EncoderCreateError = Infallible,
+        DecoderConfig = (),
+        DecoderCreateError = Infallible,
+        IDsConfig = Self::ConsensusIDsConfig,
+        ResolverConfig = ThreadedNSNameCachesConfig,
+        UDPConfig = Self::ConsensusUDPConfig,
+        UnixConfig = Self::ConsensusUnixConfig,
+        MsgAuthConfig = Self::ConsensusMsgAuthConfig,
+        SessionAuthConfig = Self::ConsensusSessAuthConfig,
+        LargeObjMsgAuthConfig = Self::ConsensusLargeObjMsgAuthConfig,
+        HashCreateError = Self::ConsensusHashCreateError,
+        MsgAuthCreateError = Self::ConsensusMsgAuthCreateError,
+        IDsCreateError = Self::ConsensusIDsCreateError,
+    > + Create<CreateError = Self::ConsensusCreateError> + Send;
 }

@@ -55,7 +55,7 @@ use log::warn;
 use uuid::Uuid;
 
 use crate::config::PeerStateConfig;
-use crate::types::SealTypes;
+use crate::types::ClientsMsgTypes;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ProcessorIdx(usize);
@@ -184,18 +184,20 @@ where
 
 pub(crate) struct PeerState<Types>
 where
-    Types: SealTypes {
+    Types: ClientsMsgTypes {
     /// Current state of transactions.
-    xacts: Mutex<HashMap<Types::HashID, PeerXact<Types::Prin, Types::Seal>>>,
+    xacts: Mutex<HashMap<Types::ConsensusHashID,
+                         PeerXact<Types::ClientsPrin, Types::ConsensusSeal>>>,
     /// Map from service information to local processor IDs.
     processors: HashMap<Uuid, ProcessorEntry>,
     /// Period at which tombstones should be expired.
     tombstone_duration: Duration,
     /// Pending consensus seals.
     seals: Mutex<HashMap<ConsensusRoundID,
-                         ConsensusSealEntry<Types::HashID, Types::Seal>>>,
+                         ConsensusSealEntry<Types::ConsensusHashID,
+                                            Types::ConsensusSeal>>>,
     /// Record of missing transactions in rounds.
-    missing: Mutex<HashMap<Types::HashID, ConsensusRoundID>>,
+    missing: Mutex<HashMap<Types::ConsensusHashID, ConsensusRoundID>>,
     /// Retry configuration.
     retry: Retry,
     /// Resubmission configuration.
@@ -634,7 +636,7 @@ where
 
 impl<Types> PeerState<Types>
 where
-    Types: SealTypes
+    Types: ClientsMsgTypes
 {
     #[inline]
     pub(crate) fn new(
@@ -681,7 +683,7 @@ where
 
     pub(crate) fn get_consensus_msgs(
         &self
-    ) -> Result<(Option<ConsensusCtlSubmit<Types::HashID>>,
+    ) -> Result<(Option<ConsensusCtlSubmit<Types::ConsensusHashID>>,
                  Option<Instant>), MutexPoison>
     {
         trace!(target: "peer-state",
@@ -743,12 +745,13 @@ where
         target: ProcessorIdx
     ) -> Result<
         (
-            Vec<XactCommittedRound<ConsensusRoundID, Types::HashID,
-                                   Types::Seal, Vec<u8>, Vec<u8>>>,
+            Vec<XactCommittedRound<ConsensusRoundID, Types::ConsensusHashID,
+                                   Types::ConsensusSeal, Vec<u8>, Vec<u8>>>,
             Vec<
                 XactSealed<
-                    Types::Seal,
-                    XactUncommittedHashReq<ConsensusRoundID, Types::HashID,
+                    Types::ConsensusSeal,
+                    XactUncommittedHashReq<ConsensusRoundID,
+                                           Types::ConsensusHashID,
                                            Vec<u8>, Vec<u8>>
                 >
             >,
@@ -896,10 +899,10 @@ where
     /// Collect outbound messages for clients.
     pub(crate) fn get_client_msgs(
         &self,
-        hashes: &mut HashSet<Types::HashID>,
-        client: &Types::Prin
+        hashes: &mut HashSet<Types::ConsensusHashID>,
+        client: &Types::ClientsPrin
     ) -> Result<
-        (Vec<XactNotify<ConsensusRoundID, Types::HashID,
+        (Vec<XactNotify<ConsensusRoundID, Types::ConsensusHashID,
                         Vec<u8>, Vec<u8>>>, Option<Instant>),
         MutexPoison
     > {
@@ -1033,14 +1036,14 @@ where
 
     pub(crate) fn add_xact(
         &self,
-        client: &Types::Prin,
+        client: &Types::ClientsPrin,
         class: Uuid,
         version: Version,
         instance: u64,
-        hash: Types::HashID,
+        hash: Types::ConsensusHashID,
         effects: XactEffects<ConsensusRoundID, Vec<u8>>,
         payload: Vec<u8>,
-        seal: Types::Seal
+        seal: Types::ConsensusSeal
     ) -> Result<(), WithMutexPoison<std::io::Error>> {
         let report = PeerReport {
             kind: PeerReportKind::Result,
@@ -1296,7 +1299,7 @@ where
 
     pub(crate) fn add_result(
         &self,
-        hash: Types::HashID,
+        hash: Types::ConsensusHashID,
         lin_point: XactLinPoint<ConsensusRoundID>,
         res: Vec<u8>
     ) -> Result<(), WithMutexPoison<std::io::Error>> {
@@ -1488,7 +1491,7 @@ where
 
     pub(crate) fn add_error(
         &self,
-        hash: Types::HashID,
+        hash: Types::ConsensusHashID,
         error: XactError<Vec<u8>>
     ) -> Result<(), WithMutexPoison<std::io::Error>> {
         debug!(target: "peer-state",
@@ -1631,7 +1634,7 @@ where
     pub(crate) fn add_consensus_seal(
         &self,
         round: ConsensusRoundID,
-        seal: XactConsensusSeal<Types::HashID, Types::Seal>
+        seal: XactConsensusSeal<Types::ConsensusHashID, Types::ConsensusSeal>
     ) -> Result<(), WithMutexPoison<std::io::Error>> {
         trace!(target: "peer-state",
                "adding consensus seal for round {}",

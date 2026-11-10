@@ -38,30 +38,30 @@ use log::debug;
 use log::warn;
 
 use crate::state::PeerState;
+use crate::types::ClientsMsgTypes;
 use crate::state::ConsensusRoundID;
 use crate::types::ConsensusMsgTypes;
-use crate::types::SealTypes;
 
 #[derive(Clone)]
 pub(crate) struct ConsensusRecv<Types>
 where
-    Types: SealTypes {
+    Types: ClientsMsgTypes {
     state: Arc<PeerState<Types>>
 }
 
 #[derive(Clone)]
 pub(crate) struct ConsensusMsgs<Types>
 where
-    Types: SealTypes {
+    Types: ClientsMsgTypes {
     state: Arc<PeerState<Types>>
 }
 
 impl<Types> LargeObjMsgs<
-    Types::Hash,
-    ConsensusCtl<ConsensusRoundID, Types::HashID, Types::Seal>
+    Types::ConsensusHash,
+    ConsensusCtl<ConsensusRoundID, Types::ConsensusHashID, Types::ConsensusSeal>
 > for ConsensusMsgs<Types>
 where
-    Types: SealTypes {
+    Types: ClientsMsgTypes {
     type AddMsgsError<Encode>
         = WithMutexPoison<LargeObjProtoAddOutboundError<Encode>>
     where
@@ -70,15 +70,19 @@ where
     fn add_msgs<WrapperCodec, F>(
         &mut self,
         sender: &mut LargeObjSender<
-            Types::Hash,
-            ConsensusCtl<ConsensusRoundID, Types::HashID, Types::Seal>,
+            Types::ConsensusHash,
+            ConsensusCtl<ConsensusRoundID,
+                         Types::ConsensusHashID,
+                         Types::ConsensusSeal>,
             WrapperCodec,
             F
         >
     ) -> Result<Option<Instant>, Self::AddMsgsError<WrapperCodec::EncodeError>>
     where
         WrapperCodec: Clone + Create
-        + Encoder<ConsensusCtl<ConsensusRoundID, Types::HashID, Types::Seal>>,
+        + Encoder<ConsensusCtl<ConsensusRoundID,
+                               Types::ConsensusHashID,
+                               Types::ConsensusSeal>>,
         WrapperCodec::Config: Default,
         F: Frags {
         let (submit, next) = self.state.get_consensus_msgs()?;
@@ -98,11 +102,11 @@ where
 }
 
 impl<Types> AuthNMsgRecv<
-    Types::Prin,
+    Types::ConsensusPrin,
     Types::ConsensusAuthMsg
 > for ConsensusRecv<Types>
 where
-    Types: ConsensusMsgTypes
+    Types: ConsensusMsgTypes + ClientsMsgTypes
 {
     /// Errors that can occur reporting messages.
     type RecvError = MutexPoison;
@@ -140,7 +144,7 @@ where
 
 impl<Types> ConsensusMsgs<Types>
 where
-    Types: SealTypes {
+    Types: ClientsMsgTypes {
     #[inline]
     pub(crate) fn new(
         state: Arc<PeerState<Types>>
@@ -151,7 +155,7 @@ where
 
 impl<Types> ConsensusRecv<Types>
 where
-    Types: SealTypes {
+    Types: ClientsMsgTypes {
     #[inline]
     pub(crate) fn new(
         state: Arc<PeerState<Types>>

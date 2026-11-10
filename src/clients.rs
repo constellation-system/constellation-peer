@@ -53,33 +53,33 @@ use log::warn;
 
 use crate::state::PeerState;
 use crate::state::ConsensusRoundID;
-use crate::types::ClientMsgTypes;
-use crate::types::ClientSessionDispatchTypes;
-use crate::types::LargeObjSessionTypes;
-use crate::types::SealTypes;
+use crate::types::ClientsMsgTypes;
+use crate::types::ClientsSessionDispatchTypes;
 
 pub(crate) struct ClientSessionDispatch<Types>
 where
-    Types: LargeObjSessionTypes {
-    sessions: Arc<Mutex<HashMap<Types::Prin, ClientSession<Types::HashID>>>>,
+    Types: ClientsMsgTypes {
+    sessions: Arc<Mutex<HashMap<Types::ClientsPrin,
+                                ClientSession<Types::ConsensusHashID>>>>,
     state: Arc<PeerState<Types>>,
 }
 
 #[derive(Clone)]
 pub(crate) struct ClientSessionRecv<Types>
 where
-    Types: SealTypes {
+    Types: ClientsMsgTypes {
     state: Arc<PeerState<Types>>,
-    sessions: Arc<Mutex<HashMap<Types::Prin, ClientSession<Types::HashID>>>>
+    sessions: Arc<Mutex<HashMap<Types::ClientsPrin,
+                                ClientSession<Types::ConsensusHashID>>>>
 }
 
 #[derive(Clone)]
 pub(crate) struct ClientSessionMsgs<Types>
 where
-    Types: SealTypes {
+    Types: ClientsMsgTypes {
     state: Arc<PeerState<Types>>,
-    subscriptions: Arc<Mutex<HashSet<Types::HashID>>>,
-    prin: Types::Prin
+    subscriptions: Arc<Mutex<HashSet<Types::ConsensusHashID>>>,
+    prin: Types::ClientsPrin
 }
 
 struct ClientSession<H>
@@ -107,11 +107,11 @@ pub(crate) enum ClientSessionRecvError<Prin> {
 }
 
 impl<Types> LargeObjMsgs<
-    Types::Hash,
-    XactBlobBatch<ConsensusRoundID, Types::HashID, Types::Seal>
+    Types::ConsensusHash,
+    XactBlobBatch<ConsensusRoundID, Types::ConsensusHashID, Types::ConsensusSeal>
 > for ClientSessionMsgs<Types>
 where
-    Types: SealTypes {
+    Types: ClientsMsgTypes {
     type AddMsgsError<Encode>
         = WithMutexPoison<LargeObjProtoAddOutboundError<Encode>>
     where
@@ -120,16 +120,19 @@ where
     fn add_msgs<WrapperCodec, F>(
         &mut self,
         sender: &mut LargeObjSender<
-            Types::Hash,
-            XactBlobBatch<ConsensusRoundID, Types::HashID, Types::Seal>,
+            Types::ConsensusHash,
+            XactBlobBatch<ConsensusRoundID,
+                          Types::ConsensusHashID,
+                          Types::ConsensusSeal>,
             WrapperCodec,
             F
         >
     ) -> Result<Option<Instant>, Self::AddMsgsError<WrapperCodec::EncodeError>>
     where
         WrapperCodec: Clone + Create
-            + Encoder<XactBlobBatch<ConsensusRoundID, Types::HashID,
-                                    Types::Seal>>,
+        + Encoder<XactBlobBatch<ConsensusRoundID,
+                                Types::ConsensusHashID,
+                                Types::ConsensusSeal>>,
         WrapperCodec::Config: Default,
         F: Frags {
         let prin = self.prin.clone();
@@ -180,19 +183,19 @@ where
 }
 
 impl<Types> AuthNMsgRecv<
-    Types::Prin,
-    Types::ClientAuthMsg
+    Types::ClientsPrin,
+    Types::ClientsAuthMsg
 >
     for ClientSessionRecv<Types>
 where
-    Types: ClientMsgTypes {
+    Types: ClientsMsgTypes {
     /// Errors that can occur reporting messages.
-    type RecvError = ClientSessionRecvError<Types::Prin>;
+    type RecvError = ClientSessionRecvError<Types::ClientsPrin>;
 
     /// Receive an authenticated message.
     fn recv_auth_msg(
         &mut self,
-        msg: Types::ClientAuthMsg
+        msg: Types::ClientsAuthMsg
     ) -> Result<(), Self::RecvError> {
         let (prin, msg) = msg.take();
 
@@ -257,7 +260,7 @@ where
 
 impl<Types> ClientSessionDispatch<Types>
 where
-    Types: LargeObjSessionTypes {
+    Types: ClientsMsgTypes {
     pub(crate) fn new(
         state: Arc<PeerState<Types>>
     ) -> Self {
@@ -270,21 +273,25 @@ where
     }
 }
 
-impl<Types> SessionDispatch<Types::ClientSessionDispTypes>
+impl<Types> SessionDispatch<Types::ClientsSessionDispTypes>
     for ClientSessionDispatch<Types>
 where
-    Types: ClientSessionDispatchTypes
+    Types: ClientsSessionDispatchTypes
 {
     type SessionError = ClientSessionDispatchError<
-        Types::Prin,
-        <XactBatchBlobCodec<u128, Types::Hash, Types::Seal, Types::SealCodec> as Create>::CreateError,
-        <XactBatchBlobCodec<u128, Types::Hash, Types::Seal, Types::SealCodec> as Create>::CreateError,
-        Types::IDsCreateError
+        Types::ClientsPrin,
+        <XactBatchBlobCodec<u128, Types::ConsensusHash,
+                            Types::ConsensusSeal,
+                            Types::ConsensusSealCodec> as Create>::CreateError,
+        <XactBatchBlobCodec<u128, Types::ConsensusHash,
+                            Types::ConsensusSeal,
+                            Types::ConsensusSealCodec> as Create>::CreateError,
+        Types::ConsensusIDsCreateError
     >;
 
     fn session(
         &self,
-        prin: &Types::Prin,
+        prin: &Types::ClientsPrin,
         _shutdown: ShutdownFlag,
         _notify: NotifyFlag
     ) -> Result<
