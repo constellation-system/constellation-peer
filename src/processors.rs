@@ -22,6 +22,7 @@ use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -36,6 +37,7 @@ use constellation_common::error::WithMutexPoison;
 use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::NotifyFlag;
 use constellation_component_common::bus::dispatch::SessionDispatch;
+use constellation_component_common::bus::types::SessionDispatchTypes;
 use constellation_component_common::xact::XactBatchBlobCodec;
 use constellation_component_common::xact::XactBlobBatch;
 use constellation_component_common::xact::XactNotifyState;
@@ -54,7 +56,6 @@ use crate::state::ProcessorIdx;
 use crate::types::ClientsMsgTypes;
 use crate::state::ConsensusRoundID;
 use crate::types::ProcessorsMsgTypes;
-use crate::types::ProcessorSessionDispatchTypes;
 
 pub(crate) struct ProcessorSessionDispatch<Types>
 where Types: ProcessorsMsgTypes + ClientsMsgTypes {
@@ -64,7 +65,7 @@ where Types: ProcessorsMsgTypes + ClientsMsgTypes {
 }
 
 #[derive(Clone)]
-pub(crate) struct ProcessorSessionRecv<Types>
+pub struct ProcessorSessionRecv<Types>
 where
     Types: ProcessorsMsgTypes + ClientsMsgTypes {
     state: Arc<PeerState<Types>>,
@@ -72,7 +73,7 @@ where
 }
 
 #[derive(Clone)]
-pub(crate) struct ProcessorSessionMsgs<Types>
+pub struct ProcessorSessionMsgs<Types>
 where
     Types: ClientsMsgTypes {
     state: Arc<PeerState<Types>>,
@@ -83,8 +84,14 @@ struct ProcessorSession {
     local_shutdown: ShutdownFlag
 }
 
+pub struct ProcessorsSessionDispatchTypes<Types>
+where
+    Types: ProcessorsMsgTypes + ClientsMsgTypes {
+    types: PhantomData<Types>
+}
+
 #[derive(Debug)]
-pub(crate) enum ProcessorSessionDispatchError<Prin, Encoder, Decoder, IDs> {
+pub enum ProcessorSessionDispatchError<Prin, Encoder, Decoder, IDs> {
     Proto {
         err: LargeObjProtoCreateError<Encoder, Decoder, IDs>
     },
@@ -98,9 +105,17 @@ pub(crate) enum ProcessorSessionDispatchError<Prin, Encoder, Decoder, IDs> {
 }
 
 #[derive(Debug)]
-pub(crate) enum ProcessorSessionRecvError<Prin> {
+pub enum ProcessorSessionRecvError<Prin> {
     NotFound { prin: Prin },
     MutexPoison
+}
+
+impl<Types> SessionDispatchTypes for ProcessorsSessionDispatchTypes<Types>
+where
+    Types: ProcessorsMsgTypes + ClientsMsgTypes {
+    type SessionPrin = Types::ProcessorsPrin;
+    type Msgs = ProcessorSessionMsgs<Types>;
+    type Recv = ProcessorSessionRecv<Types>;
 }
 
 impl<Types> LargeObjMsgs<Types::ConsensusHash,
@@ -293,10 +308,10 @@ where
     }
 }
 
-impl<Types> SessionDispatch<Types::ProcessorSessionDispTypes>
+impl<Types> SessionDispatch<ProcessorsSessionDispatchTypes<Types>>
     for ProcessorSessionDispatch<Types>
 where
-    Types: ProcessorSessionDispatchTypes + ClientsMsgTypes
+    Types: ProcessorsMsgTypes + ClientsMsgTypes
 {
     type SessionError = ProcessorSessionDispatchError<
         Types::ProcessorsPrin,

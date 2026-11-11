@@ -19,36 +19,21 @@
 use std::convert::Infallible;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::convert::TryFrom;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
-use std::hash::Hash;
-use std::marker::PhantomData;
+#[cfg(feature = "standalone")]
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
 #[cfg(feature = "standalone")]
 use clap::ArgMatches;
-use constellation_auth::authn::PassthruMsgAuthN;
-use constellation_auth::config::TestCredConfig;
-use constellation_channels::config::CompoundFarEndpoint;
-use constellation_channels::far::compound::CompoundFarChannel;
-use constellation_channels::far::compound::CompoundFarChannelXfrm;
-use constellation_channels::far::udp::UDPDatagramXfrm;
-use constellation_channels::far::unix::UnixDatagramXfrm;
-use constellation_channels::far::FarChannelCreate;
 use constellation_channels::resolve::cache::NSNameCachesCtx;
 use constellation_channels::resolve::cache::ThreadedNSNameCaches;
-use constellation_common::config::Create;
 use constellation_common::error::MutexPoison;
 use constellation_common::error::WithMutexPoison;
-use constellation_common::hashid::SHA3Algo;
-use constellation_common::hashid::SHA3ID;
-use constellation_common::ids::AscendingCount;
-use constellation_common::net::DatagramXfrmCreate;
-use constellation_common::net::IPEndpointAddr;
 use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::Notify;
 use constellation_common::version::FullVersion;
@@ -59,23 +44,14 @@ use constellation_component_common::bus::dispatch::DispatchLargeObjBusStarter;
 use constellation_component_common::bus::multicast::MulticastLargeObjBus;
 use constellation_component_common::bus::multicast::MulticastLargeObjBusCreateError;
 use constellation_component_common::bus::multicast::MulticastLargeObjBusStarter;
-use constellation_component_common::config::PartiesConfig;
-use constellation_component_common::consensus_ctl::ConsensusCtl;
-use constellation_component_common::xact::XactBatchBlobCodec;
-use constellation_component_common::xact::XactBlobBatch;
 #[cfg(feature = "standalone")]
 use constellation_standalone::Standalone;
 #[cfg(feature = "standalone")]
 use constellation_standalone::StandaloneService;
-use constellation_streams::addrs::AddrsCreate;
-use constellation_streams::large_obj::LargeObjID;
-use constellation_streams::large_obj::LargeObjMsg;
-use constellation_streams::large_obj::LargeObjMsgCodec;
 use constellation_streams::large_obj::LargeObjProtoCreateError;
 use log::debug;
 use log::error;
 use log::info;
-use log::warn;
 use uuid::Uuid;
 
 use crate::clients::ClientSessionDispatch;
@@ -111,6 +87,13 @@ where Types: PeerComponentTypes {
 
 pub struct PeerComponentCleanup<Types>
 where Types: PeerComponentTypes {
+    consensus_bus_cleanup: MulticastLargeObjBus<Types::ConsensusBusTypes, Types::Ctx>,
+    processors_bus_cleanup: DispatchLargeObjBus<Types::ProcessorsBusTypes, Types::Ctx>,
+    clients_bus_cleanup: DispatchLargeObjBus<Types::ClientsBusTypes, Types::Ctx>
+}
+
+pub struct PeerComponentErrorCleanup<Types>
+where Types: PeerComponentTypes {
     shutdown: ShutdownFlag,
     consensus_bus_cleanup: Option<MulticastLargeObjBus<Types::ConsensusBusTypes, Types::Ctx>>,
     processors_bus_cleanup: Option<DispatchLargeObjBus<Types::ProcessorsBusTypes, Types::Ctx>>,
@@ -130,13 +113,13 @@ pub enum PeerComponentCreateError {
 
 #[derive(Debug)]
 pub enum PeerComponentRunError<Processor, Client, Consensus> {
-    ProcessorComm {
+    ProcessorBus {
         err: Processor
     },
-    ClientComm {
+    ClientBus {
         err: Client
     },
-    ConsensusComm {
+    ConsensusBus {
         err: Consensus
     },
     ProcessorStart {
@@ -183,7 +166,6 @@ where Types: 'static + PeerComponentTypes
             Types::ConsensusMsgAuthConfig
         >,
         ctx: Types::Ctx,
-        _shutdown: &ShutdownFlag
     ) -> Result<Self, PeerComponentCreateError> {
         let (
             clients_config,
@@ -294,7 +276,7 @@ where Types: 'static + PeerComponentTypes
         shutdown: ShutdownFlag
     ) -> Result<
         PeerComponentCleanup<Types>,
-        (PeerComponentCleanup<Types>,
+        (PeerComponentErrorCleanup<Types>,
          PeerComponentRunError<
              WithMutexPoison<std::io::Error>,
              WithMutexPoison<std::io::Error>,
@@ -349,19 +331,18 @@ where Types: 'static + PeerComponentTypes
                     shutdown.clone()
                 ) {
                     Ok((consensus_bus, _)) => Ok(PeerComponentCleanup {
-                        consensus_bus_cleanup: Some(consensus_bus),
-                        processors_bus_cleanup: Some(processors_bus),
-                        clients_bus_cleanup: Some(clients_bus),
-                        shutdown: shutdown
+                        consensus_bus_cleanup: consensus_bus,
+                        processors_bus_cleanup: processors_bus,
+                        clients_bus_cleanup: clients_bus,
                     }),
                     Err(err) => {
-                        let cleanup = PeerComponentCleanup {
+                        let cleanup = PeerComponentErrorCleanup {
                             consensus_bus_cleanup: None,
                             processors_bus_cleanup: Some(processors_bus),
                             clients_bus_cleanup: Some(clients_bus),
                             shutdown: shutdown
                         };
-                        let err = PeerComponentRunError::ConsensusComm {
+                        let err = PeerComponentRunError::ConsensusBus {
                             err: err
                         };
 
@@ -369,27 +350,58 @@ where Types: 'static + PeerComponentTypes
                     }
                 }
                 Err(err) => {
-                    let cleanup = PeerComponentCleanup {
+                    let cleanup = PeerComponentErrorCleanup {
                         consensus_bus_cleanup: None,
                         processors_bus_cleanup: Some(processors_bus),
                         clients_bus_cleanup: None,
                         shutdown: shutdown
                     };
-                    let err = PeerComponentRunError::ClientComm { err: err };
+                    let err = PeerComponentRunError::ClientBus { err: err };
 
                     Err((cleanup, err))
                 }
             }
             Err(err) => {
-                let cleanup = PeerComponentCleanup {
+                let cleanup = PeerComponentErrorCleanup {
                     consensus_bus_cleanup: None,
                     processors_bus_cleanup: None,
                     clients_bus_cleanup: None,
                     shutdown: shutdown
                 };
-                let err = PeerComponentRunError::ProcessorComm { err: err };
+                let err = PeerComponentRunError::ProcessorBus { err: err };
 
                 Err((cleanup, err))
+            }
+        }
+    }
+}
+
+impl<Types> PeerComponentErrorCleanup<Types>
+where Types: PeerComponentTypes
+{
+    pub fn cleanup(self) {
+        let PeerComponentErrorCleanup {
+            clients_bus_cleanup,
+            processors_bus_cleanup,
+            consensus_bus_cleanup,
+            mut shutdown
+        } = self;
+
+        if let Err(err) = shutdown.set() {
+            error!(target: "peer-standalone-shutdown",
+                   "error setting shutdown flag: {}",
+                   err)
+        } else {
+            if let Some(clients_bus_cleanup) = clients_bus_cleanup {
+                clients_bus_cleanup.cleanup();
+            }
+
+            if let Some(processors_bus_cleanup) = processors_bus_cleanup {
+                processors_bus_cleanup.cleanup();
+            }
+
+            if let Some(consensus_bus_cleanup) = consensus_bus_cleanup {
+                consensus_bus_cleanup.cleanup();
             }
         }
     }
@@ -403,20 +415,11 @@ where Types: PeerComponentTypes
             clients_bus_cleanup,
             processors_bus_cleanup,
             consensus_bus_cleanup,
-            ..
         } = self;
 
-        if let Some(clients_bus_cleanup) = clients_bus_cleanup {
-            clients_bus_cleanup.cleanup();
-        }
-
-        if let Some(processors_bus_cleanup) = processors_bus_cleanup {
-            processors_bus_cleanup.cleanup();
-        }
-
-        if let Some(consensus_bus_cleanup) = consensus_bus_cleanup {
-            consensus_bus_cleanup.cleanup();
-        }
+        clients_bus_cleanup.cleanup();
+        processors_bus_cleanup.cleanup();
+        consensus_bus_cleanup.cleanup();
     }
 }
 
@@ -436,26 +439,34 @@ impl Display for PeerComponentCreateError {
     }
 }
 
-/*
-#[cfg(feature = "standalone")]
-pub type StandaloneRegistry = CompoundFarChannelRegistry<
-    Arc<TestAuthN<String, TestCred>>,
-    UnixDatagramXfrm,
-    UDPDatagramXfrm,
-    FarChannelRegistryID
->;
+impl<Processor, Client, Consensus> Display
+    for PeerComponentRunError<Processor, Client, Consensus>
+where Processor: Display,
+      Client: Display,
+      Consensus: Display {
+    #[inline]
+    fn fmt(
+        &self,
+        f: &mut Formatter<'_>
+    ) -> Result<(), Error> {
+        match self {
+            PeerComponentRunError::ProcessorBus { err } => err.fmt(f),
+            PeerComponentRunError::ClientBus { err } => err.fmt(f),
+            PeerComponentRunError::ConsensusBus { err } => err.fmt(f),
+            PeerComponentRunError::ProcessorStart { err } =>
+                write!(f, "{}", err),
+            PeerComponentRunError::ClientStart { err } =>
+                write!(f, "{}", err),
+            PeerComponentRunError::ConsensusStart { err } =>
+                write!(f, "{}", err),
+        }
+    }
+}
 
 #[cfg(feature = "standalone")]
 #[derive(Clone)]
 pub struct StandaloneCtx {
-    caches: ThreadedNSNameCaches,
-    registry: Arc<StandaloneRegistry>
-}
-
-#[cfg(feature = "standalone")]
-pub struct StandaloneCreateCleanup {
-    shutdown: ShutdownFlag,
-    caches_join: JoinHandle<()>
+    caches: ThreadedNSNameCaches
 }
 
 #[cfg(feature = "standalone")]
@@ -470,40 +481,50 @@ impl NSNameCachesCtx for StandaloneCtx {
 }
 
 #[cfg(feature = "standalone")]
-impl
-    FarChannelRegistryCtx<
-        CompoundFarChannel,
-        CompoundFarChannelThreadedFlows<
-            Arc<TestAuthN<String, TestCred>>,
-            UnixDatagramXfrm,
-            UDPDatagramXfrm,
-            FarChannelRegistryID
-        >,
-        Arc<TestAuthN<String, TestCred>>,
-        CompoundFarChannelXfrm<UnixDatagramXfrm, UDPDatagramXfrm>
-    > for StandaloneCtx
-{
-    #[inline]
-    fn far_channel_registry(&mut self) -> Arc<StandaloneRegistry> {
-        self.registry.clone()
-    }
+pub struct StandaloneCreateCleanup {
+    shutdown: ShutdownFlag,
+    caches_join: JoinHandle<()>
 }
 
 #[cfg(feature = "standalone")]
-impl Standalone
-    for CompoundPeerComponent<
-        XactBlobBatch<u128, SHA3ID, TestSeal>,
-        XactBatchBlobCodec<u128, SHA3Algo, TestSeal, TestSealCodec>,
-        SHA3Algo,
-        AscendingCount<LargeObjID>,
-        PassthruMsgAuthN<XactBlobBatch<u128, SHA3ID, TestSeal>, String>,
-        PassthruMsgAuthN<ConsensusCtl<u128, SHA3ID, TestSeal>, String>,
-        AscendingCount<u128>,
-        StandaloneCtx
-    >
+pub struct StandaloneCreateErrorCleanup {
+    caches: Option<StandaloneCreateCleanup>
+}
+
+#[cfg(feature = "standalone")]
+impl<Types> Standalone for PeerComponent<Types>
+where Types: 'static + PeerComponentTypes<Ctx = StandaloneCtx>
 {
-    type Config = StandaloneConfig;
+    type Config = StandaloneConfig<
+        Types::ClientsHashConfig,
+        Types::ClientsSessAuthConfig,
+        Types::ClientsMsgAuthConfig,
+        Types::ClientsLargeObjMsgAuthConfig,
+        Types::ClientsUnixConfig,
+        Types::ClientsUDPConfig,
+        Types::ClientsIDsConfig,
+        Types::ClientsEpochsConfig,
+        Types::ProcessorsPrin,
+        Types::ProcessorsHashConfig,
+        Types::ProcessorsSessAuthConfig,
+        Types::ProcessorsMsgAuthConfig,
+        Types::ProcessorsLargeObjMsgAuthConfig,
+        Types::ProcessorsUnixConfig,
+        Types::ProcessorsUDPConfig,
+        Types::ProcessorsIDsConfig,
+        Types::ProcessorsEpochsConfig,
+        Types::ConsensusPrin,
+        Types::ConsensusHashConfig,
+        Types::ConsensusSessAuthConfig,
+        Types::ConsensusLargeObjMsgAuthConfig,
+        Types::ConsensusUnixConfig,
+        Types::ConsensusUDPConfig,
+        Types::ConsensusIDsConfig,
+        Types::ConsensusEpochsConfig,
+        Types::ConsensusMsgAuthConfig
+    >;
     type CreateCleanup = StandaloneCreateCleanup;
+    type CreateErrorCleanup = StandaloneCreateErrorCleanup;
 
     const CONFIG_FILES: &[&str] = &["peer.conf"];
     const NAME: &str = "peer";
@@ -513,496 +534,111 @@ impl Standalone
         Some(VersionSuffix::Development)
     );
 
+    fn cleanup_create_err(create: Self::CreateErrorCleanup) {
+        if let Some(cleanup) = create.caches {
+            let StandaloneCreateCleanup {
+                caches_join,
+                mut shutdown
+            } = cleanup;
+
+            debug!(target: "processor",
+                   "cleaning up caches");
+
+            if let Err(err) = shutdown.set() {
+                error!(target: "one-shot",
+                       "error setting shutdown flag: {}",
+                       err)
+            } else if caches_join.join().is_err() {
+                error!(target: "one-shot",
+                       "error shutting down name chache threads")
+            }
+        }
+    }
+
     fn create(
         _args: ArgMatches,
-        config: Self::Config
-    ) -> Result<(Self, Self::CreateCleanup), Self::CreateCleanup> {
-        let (name_caches_config, peer_config) = config.take();
-        let (
-            clients_config,
-            processors_config,
-            consensus_config,
-            peer_state_config
-        ) = peer_config.take();
-        let (
-            client_registry_config,
-            client_comm_config,
-            client_large_obj_config,
-            client_auth_config
-        ) = clients_config.take();
-        let (
-            processor_registry_config,
-            processor_comm_config,
-            processor_large_obj_config,
-            classes_config,
-            processor_auth_config
-        ) = processors_config.take();
-        let (
-            consensus_registry_config,
-            consensus_comm_config,
-            consensus_large_obj_config
-        ) = consensus_config.take();
-        let shutdown = ShutdownFlag::new();
-        let (mut caches, caches_join) =
-            ThreadedNSNameCaches::create(name_caches_config, shutdown.clone());
+        config: Self::Config,
+        shutdown: &ShutdownFlag
+    ) -> Result<(Self, Self::CreateCleanup), Self::CreateErrorCleanup> {
+        let (name_caches_config, component_config) = config.take();
+        let (caches, caches_join) =
+            ThreadedNSNameCaches::create(name_caches_config, shutdown.clone())
+                .map_err(|err| {
+                    error!(target: "processor-standalone",
+                       "error creating name caches: {}",
+                       err);
+
+                    StandaloneCreateErrorCleanup { caches: None }
+                })?;
+        let ctx = StandaloneCtx { caches: caches };
         let cleanup = StandaloneCreateCleanup {
             shutdown: shutdown.clone(),
             caches_join: caches_join
         };
-        let (client_listener, client_reporter) = ThreadedFlowsListener::new();
-        let (processor_listener, processor_reporter) =
-            ThreadedFlowsListener::new();
-        let (consensus_listener, consensus_reporter) =
-            ThreadedFlowsListener::new();
 
-        // XXX maybe move this part into state?
-        let ProcessorClassesConfig::Static {
-            stat: processor_configs
-        } = classes_config;
-        let mut processor_ids: HashMap<String, ProcessorIdx> =
-            HashMap::with_capacity(processor_configs.len());
-        let mut classes = HashMap::with_capacity(processor_configs.len());
-        let mut curr_id = 0;
+        match PeerComponent::create(component_config, ctx) {
+            Ok(out) => Ok((out, cleanup)),
+            Err(err) => {
+                error!(target: "consensus-standalone",
+                       "error creating component: {}",
+                       err);
 
-        // Build the configuration structure for processors.
-        for processor_config in processor_configs {
-            let (prin, class_configs) = processor_config.take();
-            let id = match processor_ids.get(&prin) {
-                Some(id) => id.clone(),
-                None => {
-                    let idx = ProcessorIdx::from(curr_id);
-
-                    curr_id += 1;
-                    processor_ids.insert(prin, idx.clone());
-
-                    idx
-                }
-            };
-
-            for class_config in class_configs {
-                let (class, instances, versions) = class_config.take();
-                let versions = versions.into_iter().map(|config| config.into());
-                let class: Uuid = class.into();
-                let instance = InstanceEntry::new(id.clone(), versions);
-
-                match classes.entry(class) {
-                    Entry::Vacant(ent) => {
-                        let ent = ent.insert(HashMap::new());
-
-                        for i in instances {
-                            ent.insert(i as u64, instance.clone());
-                        }
-                    }
-                    Entry::Occupied(mut ent) => {
-                        for i in instances {
-                            if ent
-                                .get_mut()
-                                .insert(i as u64, instance.clone())
-                                .is_some()
-                            {
-                                error!(target: "start",
-                                       concat!("duplicate processor: ",
-                                               "class {}, instance {}"),
-                                       class, i);
-
-                                return Err(cleanup);
-                            }
-                        }
-                    }
-                }
+                Err(StandaloneCreateErrorCleanup {
+                    caches: Some(cleanup)
+                })
             }
         }
-
-        // XXX this is brought over from consensus, and should be
-        // turned into a general function.
-        let parties_config = consensus_comm_config.parties();
-        let authn_parties = match parties_config {
-            PartiesConfig::Static { stat } => {
-                let mut authn_parties = Vec::with_capacity(stat.len());
-
-                for party in stat {
-                    let id = party.party();
-
-                    for conn in party.party_config().connections() {
-                        for endpoint in conn.endpoints() {
-                            match endpoint {
-                                CompoundFarEndpoint::Unix { unix_datagram } => {
-                                    match UnixSocketAddr::try_from(
-                                        unix_datagram
-                                    ) {
-                                        Ok(addr) => {
-                                            let cred =
-                                                TestCred::Unix { addr: addr };
-
-                                            authn_parties
-                                                .push((cred, id.clone()));
-                                        }
-                                        Err(err) => {
-                                            warn!(target: "start",
-                                              "error converting path: {}",
-                                              err);
-                                        }
-                                    }
-                                }
-                                CompoundFarEndpoint::UDP { udp } => match udp
-                                    .ip_endpoint()
-                                {
-                                    IPEndpointAddr::Addr(addr) => {
-                                        let addr =
-                                            SocketAddr::new(*addr, udp.port());
-                                        let cred = TestCred::IP { addr: addr };
-
-                                        authn_parties.push((cred, id.clone()));
-                                    }
-                                    IPEndpointAddr::Name(name) => {
-                                        warn!(target: "start",
-                                               "discarding endpoint {}",
-                                               name);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                authn_parties
-            }
-        };
-        let consensus_authn =
-            Arc::new(TestAuthN::from_parties(authn_parties.into_iter()));
-        let processors = classes
-            .into_iter()
-            .map(|(class, mut instances)| {
-                instances.shrink_to_fit();
-
-                (class, ProcessorEntry::new(instances))
-            })
-            .collect();
-        let processors_authn = match TestAuthN::create(processor_auth_config) {
-            Ok(processor_authn) => processor_authn,
-            Err(err) => {
-                error!(target: "start",
-                       "error creating processor authn: {}",
-                       err);
-
-                return Err(cleanup);
-            }
-        };
-        let processors_authn = Arc::new(processors_authn);
-        let processors_ctx = match StandaloneRegistry::create(
-            &mut caches,
-            processors_authn,
-            processor_reporter,
-            processor_registry_config
-        ) {
-            Ok(processor_registry) => StandaloneCtx {
-                registry: Arc::new(processor_registry),
-                caches: caches.clone()
-            },
-            Err(err) => {
-                error!(target: "start",
-                       "error creating processor channel registry: {}",
-                       err);
-
-                return Err(cleanup);
-            }
-        };
-        let client_authn = match TestAuthN::create(client_auth_config) {
-            Ok(processor_authn) => processor_authn,
-            Err(err) => {
-                error!(target: "start",
-                       "error creating processor authn: {}",
-                       err);
-
-                return Err(cleanup);
-            }
-        };
-        let client_authn = Arc::new(client_authn);
-        let client_ctx = match StandaloneRegistry::create(
-            &mut caches,
-            client_authn,
-            client_reporter,
-            client_registry_config
-        ) {
-            Ok(client_registry) => StandaloneCtx {
-                registry: Arc::new(client_registry),
-                caches: caches.clone()
-            },
-            Err(err) => {
-                error!(target: "start",
-                       "error creating client channel registry: {}",
-                       err);
-
-                return Err(cleanup);
-            }
-        };
-        let consensus_ctx = match StandaloneRegistry::create(
-            &mut caches,
-            consensus_authn,
-            consensus_reporter,
-            consensus_registry_config
-        ) {
-            Ok(consensus_registry) => StandaloneCtx {
-                registry: Arc::new(consensus_registry),
-                caches: caches
-            },
-            Err(err) => {
-                error!(target: "start",
-                       "error creating consensus channel registry: {}",
-                       err);
-
-                return Err(cleanup);
-            }
-        };
-        let consensus_authn = PassthruMsgAuthN::default();
-        let peer = PeerComponent {
-            xact_wrapper: PhantomData,
-            xact_codec: PhantomData,
-            hash: PhantomData,
-            xact_auth: PhantomData,
-            ctl_auth: PhantomData,
-            ids: PhantomData,
-            resolver: PhantomData,
-            endpoint: PhantomData,
-            processor_comm_config: processor_comm_config,
-            processor_large_obj_config: processor_large_obj_config,
-            processor_listener: processor_listener,
-            peer_state_config: peer_state_config,
-            client_comm_config: client_comm_config,
-            client_large_obj_config: client_large_obj_config,
-            client_listener: client_listener,
-            consensus_listener: consensus_listener,
-            consensus_large_obj_config: consensus_large_obj_config,
-            consensus_comm_config: consensus_comm_config,
-            processors: processors,
-            processor_ids: processor_ids,
-            processors_ctx: processors_ctx,
-            consensus_ctx: consensus_ctx,
-            client_ctx: client_ctx,
-            shutdown: shutdown,
-            consensus_authn: consensus_authn
-        };
-
-        Ok((peer, cleanup))
     }
 }
 
-impl StandaloneService
-    for CompoundPeerComponent<
-        XactBlobBatch<u128, SHA3ID, TestSeal>,
-        XactBatchBlobCodec<u128, SHA3Algo, TestSeal, TestSealCodec>,
-        SHA3Algo,
-        AscendingCount<LargeObjID>,
-        PassthruMsgAuthN<XactBlobBatch<u128, SHA3ID, TestSeal>, String>,
-        PassthruMsgAuthN<ConsensusCtl<u128, SHA3ID, TestSeal>, String>,
-        AscendingCount<u128>,
-        StandaloneCtx
-    >
+#[cfg(feature = "standalone")]
+impl<Types> StandaloneService for PeerComponent<Types>
+where Types: 'static + PeerComponentTypes<Ctx = StandaloneCtx>
 {
-    type RunCleanup = PeerComponentCleanup;
-    type RunErrorCleanup = ();
+    const DEFAULT_PIDFILE: &str = "/tmp/constellation-peer.pid";
 
-    fn run(self) -> Result<Self::RunCleanup, Self::RunErrorCleanup> {
-        match self.start() {
-            Ok(out) => Ok(out),
-            Err(err) => {
-                error!(target: "peer-component",
-                       "{}", err);
+    type RunCleanup = PeerComponentCleanup<Types>;
+    type RunErrorCleanup = PeerComponentErrorCleanup<Types>;
 
-                Err(())
-            }
-        }
+    fn run(
+        self,
+        _rundir: PathBuf,
+        shutdown: ShutdownFlag
+    ) -> Result<Self::RunCleanup, Self::RunErrorCleanup> {
+        self.start(shutdown).map_err(|(cleanup, err)| {
+            error!(target: "consensus-standalone",
+                       "error running component: {}",
+                       err);
+
+            cleanup
+        })
     }
 
-    fn shutdown(
-        mut create_cleanup: Self::CreateCleanup,
-        run_cleanup: Option<Self::RunCleanup>
+    fn join(
+        create_cleanup: Self::CreateCleanup,
+        run_cleanup: Self::RunCleanup
     ) {
-        debug!(target: "peer-standalone",
-               "cleaning up peer");
-
-        create_cleanup.shutdown.set();
-
-        if let Some(cleanup) = run_cleanup {
-            debug!(target: "peer-standalone",
-               "cleaning up runtime");
-
-            cleanup.cleanup();
-        }
-
-        debug!(target: "peer-standalone",
-               "cleaning up caches");
+        run_cleanup.cleanup();
 
         if create_cleanup.caches_join.join().is_err() {
-            error!(target: "standalone-shutdown",
+            error!(target: "consensus-standalone-shutdown",
                    "error shutting down name chache threads")
         }
     }
 
     fn shutdown_err(
         mut create_cleanup: Self::CreateCleanup,
-        _run_cleanup: ()
+        run_cleanup: Self::RunErrorCleanup
     ) {
-        debug!(target: "peer-standalone",
-               "cleaning up peer");
+        run_cleanup.cleanup();
 
-        create_cleanup.shutdown.set();
-
-        if create_cleanup.caches_join.join().is_err() {
-            error!(target: "standalone-shutdown",
+        if let Err(err) = create_cleanup.shutdown.set() {
+            error!(target: "consensus-standalone-shutdown",
+                   "error setting shutdown flag: {}",
+                   err)
+        } else if create_cleanup.caches_join.join().is_err() {
+            error!(target: "consensus-standalone-shutdown",
                    "error shutting down name chache threads")
         }
     }
 }
-
-impl<Acquire, Consensus, C> Display
-    for PeerComponentRunError<Acquire, Consensus, C>
-where
-    Acquire: Display,
-    Consensus: Display,
-    C: Display
-{
-    fn fmt(
-        &self,
-        f: &mut Formatter<'_>
-    ) -> Result<(), Error> {
-        write!(f, "failed to start consensus component")
-    }
-}
-
-// ISSUE #2: Delete from here
-
-use std::convert::Infallible;
-use std::net::SocketAddr;
-
-use constellation_auth::cred::SSLCred;
-use constellation_channels::far::compound::CompoundFarChannelSessionCred;
-use constellation_channels::far::compound::CompoundFarChannelXfrmPeerAddr;
-use constellation_channels::far::compound::CompoundFarIPChannelXfrmPeerAddr;
-use constellation_channels::unix::UnixSocketAddr;
-
-#[derive(Clone, Debug)]
-pub struct TestSeal;
-
-#[derive(Clone)]
-pub struct TestSealCodec;
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub enum TestCred {
-    IP { addr: SocketAddr },
-    Unix { addr: UnixSocketAddr }
-}
-
-impl TryFrom<TestCredConfig> for TestCred {
-    type Error = std::io::Error;
-
-    #[inline]
-    fn try_from(val: TestCredConfig) -> Result<TestCred, Self::Error> {
-        match val {
-            TestCredConfig::Unix { unix } => {
-                let addr = UnixSocketAddr::try_from(unix)?;
-
-                Ok(TestCred::Unix { addr: addr })
-            }
-            TestCredConfig::IP { ip } => Ok(TestCred::IP { addr: ip })
-        }
-    }
-}
-
-impl Codec<TestSeal> for TestSealCodec {
-    type CreateError = Infallible;
-    type DecodeError = Infallible;
-    type EncodeError = Infallible;
-    type Param = ();
-
-    #[inline]
-    fn create(_param: ()) -> Result<Self, Infallible> {
-        Ok(TestSealCodec)
-    }
-
-    #[inline]
-    fn buf_size(
-        &self,
-        _val: &TestSeal
-    ) -> usize {
-        0
-    }
-
-    #[inline]
-    fn encode(
-        &mut self,
-        _val: &TestSeal,
-        _buf: &mut [u8]
-    ) -> Result<usize, Self::EncodeError> {
-        Ok(0)
-    }
-
-    #[inline]
-    fn decode(
-        &mut self,
-        _buf: &[u8]
-    ) -> Result<(TestSeal, usize), Self::DecodeError> {
-        Ok((TestSeal, 0))
-    }
-}
-
-impl<Basic> From<SSLCred<CompoundFarChannelSessionCred<Basic>>> for TestCred
-where
-    TestCred: From<Basic>
-{
-    fn from(_val: SSLCred<CompoundFarChannelSessionCred<Basic>>) -> TestCred {
-        panic!("Not supported!")
-    }
-}
-
-impl From<CompoundFarIPChannelXfrmPeerAddr> for TestCred {
-    fn from(val: CompoundFarIPChannelXfrmPeerAddr) -> TestCred {
-        match val {
-            CompoundFarIPChannelXfrmPeerAddr::UDP { udp } => {
-                TestCred::IP { addr: udp }
-            }
-            _ => panic!("Not supported!")
-        }
-    }
-}
-
-impl From<CompoundFarChannelXfrmPeerAddr> for TestCred {
-    fn from(val: CompoundFarChannelXfrmPeerAddr) -> TestCred {
-        match val {
-            CompoundFarChannelXfrmPeerAddr::Unix { unix } => {
-                TestCred::Unix { addr: unix }
-            }
-            CompoundFarChannelXfrmPeerAddr::IP { ip } => TestCred::from(ip)
-        }
-    }
-}
-
-impl<Basic> From<CompoundFarChannelSessionCred<Basic>> for TestCred
-where
-    TestCred: From<Basic>
-{
-    fn from(val: CompoundFarChannelSessionCred<Basic>) -> TestCred {
-        match val {
-            CompoundFarChannelSessionCred::Basic { basic } => {
-                TestCred::from(basic)
-            }
-            _ => panic!("Not supported!")
-        }
-    }
-}
-
-impl Display for TestCred {
-    #[inline]
-    fn fmt(
-        &self,
-        f: &mut Formatter<'_>
-    ) -> Result<(), Error> {
-        match self {
-            TestCred::IP { addr } => write!(f, "ip://{}", addr),
-            TestCred::Unix { addr } => write!(f, "unix://{}", addr)
-        }
-    }
-}
-
-// ISSUE #2: to here
-*/

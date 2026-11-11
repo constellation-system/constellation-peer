@@ -24,6 +24,7 @@ use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
 use std::hash::Hash;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -39,6 +40,7 @@ use constellation_common::hashid::HashID;
 use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::NotifyFlag;
 use constellation_component_common::bus::dispatch::SessionDispatch;
+use constellation_component_common::bus::types::SessionDispatchTypes;
 use constellation_component_common::xact::XactBatchBlobCodec;
 use constellation_component_common::xact::XactBlobBatch;
 use constellation_streams::frags::Frags;
@@ -54,7 +56,6 @@ use log::warn;
 use crate::state::PeerState;
 use crate::state::ConsensusRoundID;
 use crate::types::ClientsMsgTypes;
-use crate::types::ClientsSessionDispatchTypes;
 
 pub(crate) struct ClientSessionDispatch<Types>
 where
@@ -65,7 +66,7 @@ where
 }
 
 #[derive(Clone)]
-pub(crate) struct ClientSessionRecv<Types>
+pub struct ClientSessionRecv<Types>
 where
     Types: ClientsMsgTypes {
     state: Arc<PeerState<Types>>,
@@ -74,12 +75,18 @@ where
 }
 
 #[derive(Clone)]
-pub(crate) struct ClientSessionMsgs<Types>
+pub struct ClientSessionMsgs<Types>
 where
     Types: ClientsMsgTypes {
     state: Arc<PeerState<Types>>,
     subscriptions: Arc<Mutex<HashSet<Types::ConsensusHashID>>>,
     prin: Types::ClientsPrin
+}
+
+pub struct ClientsSessionDispatchTypes<Types>
+where
+    Types: ClientsMsgTypes {
+    types: PhantomData<Types>
 }
 
 struct ClientSession<H>
@@ -90,7 +97,7 @@ where
 }
 
 #[derive(Debug)]
-pub(crate) enum ClientSessionDispatchError<Prin, Encoder, Decoder, IDs> {
+pub enum ClientSessionDispatchError<Prin, Encoder, Decoder, IDs> {
     Proto {
         err: LargeObjProtoCreateError<Encoder, Decoder, IDs>
     },
@@ -101,9 +108,17 @@ pub(crate) enum ClientSessionDispatchError<Prin, Encoder, Decoder, IDs> {
 }
 
 #[derive(Debug)]
-pub(crate) enum ClientSessionRecvError<Prin> {
+pub enum ClientSessionRecvError<Prin> {
     NotFound { prin: Prin },
     MutexPoison
+}
+
+impl<Types> SessionDispatchTypes for ClientsSessionDispatchTypes<Types>
+where
+    Types: ClientsMsgTypes {
+    type SessionPrin = Types::ClientsPrin;
+    type Msgs = ClientSessionMsgs<Types>;
+    type Recv = ClientSessionRecv<Types>;
 }
 
 impl<Types> LargeObjMsgs<
@@ -273,10 +288,10 @@ where
     }
 }
 
-impl<Types> SessionDispatch<Types::ClientsSessionDispTypes>
+impl<Types> SessionDispatch<ClientsSessionDispatchTypes<Types>>
     for ClientSessionDispatch<Types>
 where
-    Types: ClientsSessionDispatchTypes
+    Types: ClientsMsgTypes
 {
     type SessionError = ClientSessionDispatchError<
         Types::ClientsPrin,

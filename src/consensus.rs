@@ -43,14 +43,14 @@ use crate::state::ConsensusRoundID;
 use crate::types::ConsensusMsgTypes;
 
 #[derive(Clone)]
-pub(crate) struct ConsensusRecv<Types>
+pub struct ConsensusRecv<Types>
 where
     Types: ClientsMsgTypes {
     state: Arc<PeerState<Types>>
 }
 
 #[derive(Clone)]
-pub(crate) struct ConsensusMsgs<Types>
+pub struct ConsensusMsgs<Types>
 where
     Types: ClientsMsgTypes {
     state: Arc<PeerState<Types>>

@@ -32,22 +32,21 @@ use constellation_common::hashid::HashAlgo;
 use constellation_common::hashid::HashID;
 use constellation_component_common::bus::types::DispatchLargeObjBusTypes;
 use constellation_component_common::bus::types::MulticastLargeObjBusTypes;
-use constellation_component_common::bus::types::SessionDispatchTypes;
 use constellation_component_common::consensus_ctl::ConsensusCtl;
 use constellation_component_common::xact::XactBlobBatch;
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::state::ConsensusRoundID;
-use crate::clients::ClientSessionMsgs;
-use crate::clients::ClientSessionRecv;
+use crate::clients::ClientsSessionDispatchTypes;
 use crate::consensus::ConsensusMsgs;
 use crate::consensus::ConsensusRecv;
-use crate::processors::ProcessorSessionMsgs;
-use crate::processors::ProcessorSessionRecv;
+use crate::processors::ProcessorsSessionDispatchTypes;
 
 pub trait ConsensusBaseTypes {
-    type ConsensusPrin: Clone + Debug + Display + Eq + Hash + Send + Sync;
+    type ConsensusPrin: Clone + Debug + Display + Eq + Hash + for<'a> Deserialize<'a> + Serialize + Send + Sync;
     type ConsensusSeal: Clone + Send;
-    type ConsensusSealCodecConfig: Clone + Default;
+    type ConsensusSealCodecConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize;
     type ConsensusSealCreateError: Debug + Display + ScopedError;
     type ConsensusSealCodec: Decoder<Self::ConsensusSeal>
         + Encoder<Self::ConsensusSeal>
@@ -77,57 +76,30 @@ pub trait ClientsMsgTypes: ConsensusBaseTypes {
     >;
 }
 
-pub trait ClientsSessionDispatchTypes: ClientsMsgTypes + Sized {
-    type ClientsSessionDispTypes: SessionDispatchTypes<
-        SessionPrin = Self::ClientsPrin,
-        Recv = ClientSessionRecv<Self>,
-        Msgs = ClientSessionMsgs<Self>
-    >;
-}
-
 pub trait ProcessorsMsgTypes: ConsensusBaseTypes {
-    type ProcessorsPrin: Clone + Debug + Display + Eq + Hash + Send + Sync;
+    type ProcessorsPrin: Clone + Debug + Display + Eq + Hash + for<'a> Deserialize<'a> + Serialize + Send + Sync;
     type ProcessorsAuthMsg: AuthNedDestruct<
         Self::ProcessorsPrin,
         XactBlobBatch<ConsensusRoundID,
                       Self::ConsensusHashID,
                       Self::ConsensusSeal>,
     >;
-    type ProcessorsCodecCreateError: Debug + Display + ScopedError;
-    type ProcessorsCodec: Clone
-        + Create
-        + Decoder<XactBlobBatch<ConsensusRoundID,
-                                Self::ConsensusHashID,
-                                Self::ConsensusSeal>>
-        + Encoder<XactBlobBatch<ConsensusRoundID,
-                                Self::ConsensusHashID,
-                                Self::ConsensusSeal>>;
-}
-
-pub trait ProcessorSessionDispatchTypes: ClientsMsgTypes
-    + ProcessorsMsgTypes + Sized {
-    type ProcessorSessionDispTypes: SessionDispatchTypes<
-        SessionPrin = Self::ProcessorsPrin,
-        Recv = ProcessorSessionRecv<Self>,
-        Msgs = ProcessorSessionMsgs<Self>
-    >;
 }
 
 pub trait PeerComponentTypes: ConsensusMsgTypes
-    + ClientsSessionDispatchTypes
-    + ProcessorSessionDispatchTypes
+    + ClientsMsgTypes
+    + ProcessorsMsgTypes
     + Sized {
     type Ctx: 'static + Clone + NSNameCachesCtx + Send;
     type Addr: Clone + Debug + Display + Eq + Hash + Send;
-
-    type ClientsSessAuthConfig: Clone + Send;
-    type ClientsMsgAuthConfig;
-    type ClientsLargeObjMsgAuthConfig: Send;
-    type ClientsHashConfig: Default;
-    type ClientsIDsConfig: Default;
-    type ClientsUDPConfig: Clone + Default + Send;
-    type ClientsUnixConfig: Clone + Default + Send;
-    type ClientsEpochsConfig: Default;
+    type ClientsSessAuthConfig: Clone + for<'a> Deserialize<'a> + Serialize + Send;
+    type ClientsMsgAuthConfig: for<'a> Deserialize<'a> + Serialize;
+    type ClientsLargeObjMsgAuthConfig: for<'a> Deserialize<'a> + Serialize + Send;
+    type ClientsHashConfig: Default + for<'a> Deserialize<'a> + Serialize;
+    type ClientsIDsConfig: Default + for<'a> Deserialize<'a> + Serialize;
+    type ClientsUDPConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
+    type ClientsUnixConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
+    type ClientsEpochsConfig: Default + for<'a> Deserialize<'a> + Serialize;
     type ClientsCreateError: Debug + Display + Send;
     type ClientsBusTypes: 'static + DispatchLargeObjBusTypes<
         Self::Ctx,
@@ -141,16 +113,16 @@ pub trait PeerComponentTypes: ConsensusMsgTypes
         SessionAuthConfig = Self::ClientsSessAuthConfig,
         MsgAuthConfig = Self::ClientsMsgAuthConfig,
         LargeObjMsgAuthConfig = Self::ClientsLargeObjMsgAuthConfig,
-        DispTypes = Self::ClientsSessionDispTypes
+        DispTypes = ClientsSessionDispatchTypes<Self>
     > + Create<CreateError = Self::ClientsCreateError>;
-    type ProcessorsSessAuthConfig: Clone + Send;
-    type ProcessorsMsgAuthConfig;
-    type ProcessorsLargeObjMsgAuthConfig: Send;
-    type ProcessorsHashConfig: Default;
-    type ProcessorsIDsConfig: Default;
-    type ProcessorsUDPConfig: Clone + Default + Send;
-    type ProcessorsUnixConfig: Clone + Default + Send;
-    type ProcessorsEpochsConfig: Default;
+    type ProcessorsSessAuthConfig: Clone + for<'a> Deserialize<'a> + Serialize + Send;
+    type ProcessorsMsgAuthConfig: for<'a> Deserialize<'a> + Serialize;
+    type ProcessorsLargeObjMsgAuthConfig: for<'a> Deserialize<'a> + Serialize + Send;
+    type ProcessorsHashConfig: Default + for<'a> Deserialize<'a> + Serialize;
+    type ProcessorsIDsConfig: Default + for<'a> Deserialize<'a> + Serialize;
+    type ProcessorsUDPConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
+    type ProcessorsUnixConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
+    type ProcessorsEpochsConfig: Default + for<'a> Deserialize<'a> + Serialize;
     type ProcessorsCreateError: Debug + Display;
     type ProcessorsBusTypes: 'static + DispatchLargeObjBusTypes<
         Self::Ctx,
@@ -164,18 +136,18 @@ pub trait PeerComponentTypes: ConsensusMsgTypes
         MsgAuthConfig = Self::ProcessorsMsgAuthConfig,
         SessionAuthConfig = Self::ProcessorsSessAuthConfig,
         LargeObjMsgAuthConfig = Self::ProcessorsLargeObjMsgAuthConfig,
-        DispTypes = Self::ProcessorSessionDispTypes
+        DispTypes = ProcessorsSessionDispatchTypes<Self>
     > + Create<CreateError = Self::ProcessorsCreateError>;
-    type ConsensusSessAuthConfig: Clone + Send;
-    type ConsensusMsgAuthConfig: Send;
+    type ConsensusSessAuthConfig: Clone + for<'a> Deserialize<'a> + Serialize + Send;
+    type ConsensusMsgAuthConfig: for<'a> Deserialize<'a> + Serialize + Send;
     type ConsensusMsgAuthCreateError: Debug + Display;
-    type ConsensusLargeObjMsgAuthConfig: Send;
-    type ConsensusHashConfig: Default;
+    type ConsensusLargeObjMsgAuthConfig: for<'a> Deserialize<'a> + Serialize + Send;
+    type ConsensusHashConfig: Default + for<'a> Deserialize<'a> + Serialize;
     type ConsensusHashCreateError: Debug + Display;
-    type ConsensusIDsConfig: Default;
-    type ConsensusUDPConfig: Clone + Default + Send;
-    type ConsensusUnixConfig: Clone + Default + Send;
-    type ConsensusEpochsConfig: Default + Send;
+    type ConsensusIDsConfig: Default + for<'a> Deserialize<'a> + Serialize;
+    type ConsensusUDPConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
+    type ConsensusUnixConfig: Clone + Default + for<'a> Deserialize<'a> + Serialize + Send;
+    type ConsensusEpochsConfig: Default + for<'a> Deserialize<'a> + Serialize + Send;
     type ConsensusCreateError: Debug + Display;
     type ConsensusBusTypes: 'static + MulticastLargeObjBusTypes<
         Self::Ctx,
@@ -201,4 +173,57 @@ pub trait PeerComponentTypes: ConsensusMsgTypes
         MsgAuthCreateError = Self::ConsensusMsgAuthCreateError,
         IDsCreateError = Self::ConsensusIDsCreateError,
     > + Create<CreateError = Self::ConsensusCreateError> + Send;
+}
+
+pub struct StandalonePeerTypes;
+
+#[cfg(feature = "standalone")]
+use constellation_auth::authn::BasicAuthNed;
+#[cfg(feature = "standalone")]
+use constellation_common::hashid::SHA3Algo;
+#[cfg(feature = "standalone")]
+use constellation_common::hashid::SHA3ID;
+#[cfg(feature = "standalone")]
+use constellation_component_common::xact::test::TestSeal;
+#[cfg(feature = "standalone")]
+use constellation_component_common::xact::test::TestSealCodec;
+
+#[cfg(feature = "standalone")]
+impl ConsensusBaseTypes for StandalonePeerTypes {
+    type ConsensusPrin = String;
+    type ConsensusSeal = TestSeal;
+    type ConsensusSealCodecConfig = ();
+    type ConsensusSealCreateError = Infallible;
+    type ConsensusSealCodec = TestSealCodec;
+    type ConsensusHashID = SHA3ID;
+    type ConsensusHash = SHA3Algo;
+    type ConsensusIDsCreateError = Infallible;
+}
+
+#[cfg(feature = "standalone")]
+impl ConsensusMsgTypes for StandalonePeerTypes {
+    type ConsensusAuthMsg =
+        BasicAuthNed<String, ConsensusCtl<ConsensusRoundID, SHA3ID, TestSeal>>;
+}
+
+#[cfg(feature = "standalone")]
+impl ClientsMsgTypes for StandalonePeerTypes {
+    type ClientsPrin = String;
+    type ClientsAuthMsg = BasicAuthNed<
+        String,
+        XactBlobBatch<ConsensusRoundID,
+                      Self::ConsensusHashID,
+                      Self::ConsensusSeal>,
+    >;
+}
+
+#[cfg(feature = "standalone")]
+impl ProcessorsMsgTypes for StandalonePeerTypes {
+    type ProcessorsPrin = String;
+    type ProcessorsAuthMsg = BasicAuthNed<
+        String,
+        XactBlobBatch<ConsensusRoundID,
+                      Self::ConsensusHashID,
+                      Self::ConsensusSeal>,
+    >;
 }
