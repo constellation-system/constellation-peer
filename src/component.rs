@@ -69,9 +69,6 @@ use crate::state::ProcessorEntry;
 use crate::state::ProcessorIdx;
 use crate::types::PeerComponentTypes;
 
-// XXX this is going to need separate session authenticators, and
-// ultimately a whole separate instantiation of the flows types.  This
-// is best done with type traits, when we get to that.
 pub struct PeerComponent<Types>
 where Types: PeerComponentTypes {
     clients_bus: DispatchLargeObjBusStarter<Types::ClientsBusTypes, Types::Ctx>,
@@ -163,6 +160,7 @@ where Types: 'static + PeerComponentTypes
             Types::ConsensusUDPConfig,
             Types::ConsensusIDsConfig,
             Types::ConsensusEpochsConfig,
+            Types::ConsensusResolverConfig,
             Types::ConsensusMsgAuthConfig
         >,
         ctx: Types::Ctx,
@@ -521,6 +519,7 @@ where Types: 'static + PeerComponentTypes<Ctx = StandaloneCtx>
         Types::ConsensusUDPConfig,
         Types::ConsensusIDsConfig,
         Types::ConsensusEpochsConfig,
+        Types::ConsensusResolverConfig,
         Types::ConsensusMsgAuthConfig
     >;
     type CreateCleanup = StandaloneCreateCleanup;
@@ -642,3 +641,9 @@ where Types: 'static + PeerComponentTypes<Ctx = StandaloneCtx>
         }
     }
 }
+
+#[cfg(feature = "standalone")]
+use crate::types::StandalonePeerTypes;
+
+#[cfg(feature = "standalone")]
+pub type StandalonePeerComponent = PeerComponent<StandalonePeerTypes>;

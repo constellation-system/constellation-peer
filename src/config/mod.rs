@@ -58,6 +58,7 @@ pub struct PeerConfig<
     ConsensusUDP,
     ConsensusIDs,
     ConsensusEpochs,
+    ConsensusResolver,
     ConsensusMsgAuthN
 > where
     ClientHash: Default,
@@ -74,6 +75,7 @@ pub struct PeerConfig<
     ConsensusUnix: Default,
     ConsensusIDs: Default,
     ConsensusHash: Default,
+    ConsensusResolver: Default,
     ConsensusEpochs: Default
 {
     /// Configuration for incoming client connections.
@@ -93,7 +95,7 @@ pub struct PeerConfig<
         ConsensusUnix,
         ConsensusUDP,
         ConsensusIDs,
-        ThreadedNSNameCachesConfig,
+        ConsensusResolver,
         ConsensusEpochs,
         ConsensusMsgAuthN
     >,
@@ -294,6 +296,7 @@ pub struct StandaloneConfig<
     ConsensusUDP,
     ConsensusIDs,
     ConsensusEpochs,
+    ConsensusResolver,
     ConsensusMsgAuthN
 > where
     ClientHash: Default,
@@ -310,6 +313,7 @@ pub struct StandaloneConfig<
     ConsensusUnix: Default,
     ConsensusIDs: Default,
     ConsensusHash: Default,
+    ConsensusResolver: Default,
     ConsensusEpochs: Default
 {
     /// Name cache configuration.
@@ -343,6 +347,7 @@ pub struct StandaloneConfig<
         ConsensusUDP,
         ConsensusIDs,
         ConsensusEpochs,
+        ConsensusResolver,
         ConsensusMsgAuthN
     >
 }
@@ -521,6 +526,7 @@ impl<
     ConsensusUDP,
     ConsensusIDs,
     ConsensusEpochs,
+    ConsensusResolver,
     ConsensusMsgAuthN
 > PeerConfig<
         ClientHash,
@@ -548,6 +554,7 @@ impl<
         ConsensusUDP,
         ConsensusIDs,
         ConsensusEpochs,
+        ConsensusResolver,
         ConsensusMsgAuthN
 > where
     ClientHash: Default,
@@ -564,6 +571,7 @@ impl<
     ConsensusUnix: Default,
     ConsensusIDs: Default,
     ConsensusHash: Default,
+    ConsensusResolver: Default,
     ConsensusEpochs: Default
 {
     #[inline]
@@ -582,7 +590,7 @@ impl<
             ConsensusUnix,
             ConsensusUDP,
             ConsensusIDs,
-            ThreadedNSNameCachesConfig,
+            ConsensusResolver,
             ConsensusEpochs,
             ConsensusMsgAuthN
         >,
@@ -625,7 +633,7 @@ impl<
         ConsensusUnix,
         ConsensusUDP,
         ConsensusIDs,
-        ThreadedNSNameCachesConfig,
+        ConsensusResolver,
         ConsensusEpochs,
         ConsensusMsgAuthN
     > {
@@ -655,7 +663,7 @@ impl<
             ConsensusUnix,
             ConsensusUDP,
             ConsensusIDs,
-            ThreadedNSNameCachesConfig,
+            ConsensusResolver,
             ConsensusEpochs,
             ConsensusMsgAuthN
         >,
@@ -920,6 +928,7 @@ impl<
     ConsensusUDP,
     ConsensusIDs,
     ConsensusEpochs,
+    ConsensusResolver,
     ConsensusMsgAuthN
 > StandaloneConfig<
     ClientHash,
@@ -947,6 +956,7 @@ impl<
     ConsensusUDP,
     ConsensusIDs,
     ConsensusEpochs,
+    ConsensusResolver,
     ConsensusMsgAuthN
 > where
     ClientHash: Default,
@@ -963,6 +973,7 @@ impl<
     ConsensusUnix: Default,
     ConsensusIDs: Default,
     ConsensusHash: Default,
+    ConsensusResolver: Default,
     ConsensusEpochs: Default
 {
     #[inline]
@@ -994,6 +1005,7 @@ impl<
             ConsensusUDP,
             ConsensusIDs,
             ConsensusEpochs,
+            ConsensusResolver,
             ConsensusMsgAuthN
         >
     ) -> Self {
@@ -1037,6 +1049,7 @@ impl<
         ConsensusUDP,
         ConsensusIDs,
         ConsensusEpochs,
+        ConsensusResolver,
         ConsensusMsgAuthN
     > {
         &self.peer
@@ -1073,6 +1086,7 @@ impl<
             ConsensusUDP,
             ConsensusIDs,
             ConsensusEpochs,
+            ConsensusResolver,
             ConsensusMsgAuthN
         >
     ) {

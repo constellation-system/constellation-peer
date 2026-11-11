@@ -38,7 +38,7 @@ use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::NotifyFlag;
 use constellation_component_common::bus::dispatch::SessionDispatch;
 use constellation_component_common::bus::types::SessionDispatchTypes;
-use constellation_component_common::xact::XactBatchBlobCodec;
+use constellation_component_common::xact::XactBlobBatchCodec;
 use constellation_component_common::xact::XactBlobBatch;
 use constellation_component_common::xact::XactNotifyState;
 use constellation_streams::frags::Frags;
@@ -315,10 +315,10 @@ where
 {
     type SessionError = ProcessorSessionDispatchError<
         Types::ProcessorsPrin,
-        <XactBatchBlobCodec<u128, Types::ConsensusHash,
+        <XactBlobBatchCodec<u128, Types::ConsensusHash,
                             Types::ConsensusSeal,
                             Types::ConsensusSealCodec> as Create>::CreateError,
-        <XactBatchBlobCodec<u128, Types::ConsensusHash,
+        <XactBlobBatchCodec<u128, Types::ConsensusHash,
                             Types::ConsensusSeal,
                             Types::ConsensusSealCodec> as Create>::CreateError,
         Types::ConsensusIDsCreateError

@@ -17,9 +17,9 @@
 // <https://www.gnu.org/licenses/>.
 
 //! Standalone consensus component.
-use constellation_peer::component::PeerComponent;
+use constellation_peer::component::StandalonePeerComponent;
 use constellation_standalone::StandaloneService;
 
 fn main() {
-    PeerComponent::main()
+    StandalonePeerComponent::main()
 }
