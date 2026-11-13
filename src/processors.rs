@@ -16,8 +16,8 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Error;
@@ -27,8 +27,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
 
-use constellation_auth::authn::AuthNedDestruct;
 use constellation_auth::authn::AuthNMsgRecv;
+use constellation_auth::authn::AuthNedDestruct;
 use constellation_common::codec::Encoder;
 use constellation_common::config::Create;
 use constellation_common::error::ErrorScope;
@@ -38,8 +38,8 @@ use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::NotifyFlag;
 use constellation_component_common::bus::dispatch::SessionDispatch;
 use constellation_component_common::bus::types::SessionDispatchTypes;
-use constellation_component_common::xact::XactBlobBatchCodec;
 use constellation_component_common::xact::XactBlobBatch;
+use constellation_component_common::xact::XactBlobBatchCodec;
 use constellation_component_common::xact::XactNotifyState;
 use constellation_streams::frags::Frags;
 use constellation_streams::large_obj::LargeObjMsgs;
@@ -51,14 +51,15 @@ use log::error;
 use log::trace;
 use log::warn;
 
+use crate::state::ConsensusRoundID;
 use crate::state::PeerState;
 use crate::state::ProcessorIdx;
 use crate::types::ClientsMsgTypes;
-use crate::state::ConsensusRoundID;
 use crate::types::ProcessorsMsgTypes;
 
 pub(crate) struct ProcessorSessionDispatch<Types>
-where Types: ProcessorsMsgTypes + ClientsMsgTypes {
+where
+    Types: ProcessorsMsgTypes + ClientsMsgTypes {
     sessions: Arc<Mutex<HashMap<Types::ProcessorsPrin, ProcessorSession>>>,
     state: Arc<PeerState<Types>>,
     processors: HashMap<Types::ProcessorsPrin, ProcessorIdx>
@@ -78,6 +79,16 @@ where
     Types: ClientsMsgTypes {
     state: Arc<PeerState<Types>>,
     idx: ProcessorIdx
+}
+
+#[derive(Debug)]
+pub enum ProcessorMsgsAddMsgsError<Outbound> {
+    Msgs {
+        err: WithMutexPoison<std::io::Error>
+    },
+    Outbound {
+        err: Outbound
+    }
 }
 
 struct ProcessorSession {
@@ -112,20 +123,27 @@ pub enum ProcessorSessionRecvError<Prin> {
 
 impl<Types> SessionDispatchTypes for ProcessorsSessionDispatchTypes<Types>
 where
-    Types: ProcessorsMsgTypes + ClientsMsgTypes {
-    type SessionPrin = Types::ProcessorsPrin;
+    Types: ProcessorsMsgTypes + ClientsMsgTypes
+{
     type Msgs = ProcessorSessionMsgs<Types>;
     type Recv = ProcessorSessionRecv<Types>;
+    type SessionPrin = Types::ProcessorsPrin;
 }
 
-impl<Types> LargeObjMsgs<Types::ConsensusHash,
-                         XactBlobBatch<ConsensusRoundID, Types::ConsensusHashID,
-                                       Types::ConsensusSeal>>
-    for ProcessorSessionMsgs<Types>
+impl<Types>
+    LargeObjMsgs<
+        Types::ConsensusHash,
+        XactBlobBatch<
+            ConsensusRoundID,
+            Types::ConsensusHashID,
+            Types::ConsensusSeal
+        >
+    > for ProcessorSessionMsgs<Types>
 where
-    Types: ProcessorsMsgTypes + ClientsMsgTypes {
+    Types: ProcessorsMsgTypes + ClientsMsgTypes
+{
     type AddMsgsError<Encode>
-        = WithMutexPoison<LargeObjProtoAddOutboundError<Encode>>
+        = ProcessorMsgsAddMsgsError<LargeObjProtoAddOutboundError<Encode>>
     where
         Encode: Debug + Display + ScopedError;
 
@@ -133,29 +151,41 @@ where
         &mut self,
         sender: &mut LargeObjSender<
             Types::ConsensusHash,
-            XactBlobBatch<ConsensusRoundID,
-                          Types::ConsensusHashID,
-                          Types::ConsensusSeal>,
+            XactBlobBatch<
+                ConsensusRoundID,
+                Types::ConsensusHashID,
+                Types::ConsensusSeal
+            >,
             WrapperCodec,
             F
         >
     ) -> Result<Option<Instant>, Self::AddMsgsError<WrapperCodec::EncodeError>>
     where
-        WrapperCodec: Clone + Create
-        + Encoder<XactBlobBatch<ConsensusRoundID,
-                                Types::ConsensusHashID,
-                                Types::ConsensusSeal>>,
+        WrapperCodec: Clone
+            + Create
+            + Encoder<
+                XactBlobBatch<
+                    ConsensusRoundID,
+                    Types::ConsensusHashID,
+                    Types::ConsensusSeal
+                >
+            >,
         WrapperCodec::Config: Default,
         F: Frags {
-        let (committed, reqs, next) =
-            self.state.get_processor_msgs(self.idx.clone())?;
+        let (committed, reqs, notifies, next) = self
+            .state
+            .get_processor_msgs(self.idx.clone())
+            .map_err(|err| ProcessorMsgsAddMsgsError::Msgs { err: err })?;
 
-        if !committed.is_empty() || !reqs.is_empty() {
-            let batch = XactBlobBatch::new(committed, reqs, vec![]);
+        if !committed.is_empty() || !reqs.is_empty() || !notifies.is_empty() {
+            trace!(target: "processor-session-msgs",
+                   "generating processor message batch");
 
-            sender
-                .add_outbound(&batch)
-                .map_err(|err| WithMutexPoison::Inner { err: err })?;
+            let batch = XactBlobBatch::new(committed, reqs, notifies);
+
+            sender.add_outbound(&batch).map_err(|err| {
+                ProcessorMsgsAddMsgsError::Outbound { err: err }
+            })?;
 
             Ok(next)
         } else {
@@ -186,12 +216,11 @@ impl Drop for ProcessorSession {
     }
 }
 
-impl<Types> AuthNMsgRecv<
-    Types::ProcessorsPrin,
-    Types::ProcessorsAuthMsg
-> for ProcessorSessionRecv<Types>
+impl<Types> AuthNMsgRecv<Types::ProcessorsPrin, Types::ProcessorsAuthMsg>
+    for ProcessorSessionRecv<Types>
 where
-    Types: ProcessorsMsgTypes + ClientsMsgTypes {
+    Types: ProcessorsMsgTypes + ClientsMsgTypes
+{
     /// Errors that can occur reporting messages.
     type RecvError = ProcessorSessionRecvError<Types::ProcessorsPrin>;
 
@@ -293,7 +322,8 @@ where
 
 impl<Types> ProcessorSessionDispatch<Types>
 where
-    Types: ProcessorsMsgTypes + ClientsMsgTypes {
+    Types: ProcessorsMsgTypes + ClientsMsgTypes
+{
     pub(crate) fn new(
         processors: HashMap<Types::ProcessorsPrin, ProcessorIdx>,
         state: Arc<PeerState<Types>>
@@ -315,12 +345,18 @@ where
 {
     type SessionError = ProcessorSessionDispatchError<
         Types::ProcessorsPrin,
-        <XactBlobBatchCodec<u128, Types::ConsensusHash,
-                            Types::ConsensusSeal,
-                            Types::ConsensusSealCodec> as Create>::CreateError,
-        <XactBlobBatchCodec<u128, Types::ConsensusHash,
-                            Types::ConsensusSeal,
-                            Types::ConsensusSealCodec> as Create>::CreateError,
+        <XactBlobBatchCodec<
+            u128,
+            Types::ConsensusHash,
+            Types::ConsensusSeal,
+            Types::ConsensusSealCodec
+        > as Create>::CreateError,
+        <XactBlobBatchCodec<
+            u128,
+            Types::ConsensusHash,
+            Types::ConsensusSeal,
+            Types::ConsensusSealCodec
+        > as Create>::CreateError,
         Types::ConsensusIDsCreateError
     >;
 
@@ -337,6 +373,10 @@ where
         ),
         Self::SessionError
     > {
+        trace!(target: "processor-session-dispatch",
+               "dispatching session for {}",
+               prin);
+
         if let Some(idx) = self.processors.get(&prin) {
             let mut sessions = self
                 .sessions
@@ -389,8 +429,9 @@ where
             ProcessorSessionDispatchError::Proto { err } => err.scope(),
             ProcessorSessionDispatchError::Unknown { .. } |
             ProcessorSessionDispatchError::Exists { .. } |
-            ProcessorSessionDispatchError::MutexPoison =>
+            ProcessorSessionDispatchError::MutexPoison => {
                 ErrorScope::Unrecoverable
+            }
         }
     }
 }
@@ -439,6 +480,33 @@ where
             ProcessorSessionRecvError::MutexPoison => {
                 write!(f, "mutex poisoned")
             }
+        }
+    }
+}
+
+impl<Outbound> ScopedError for ProcessorMsgsAddMsgsError<Outbound>
+where
+    Outbound: ScopedError
+{
+    fn scope(&self) -> ErrorScope {
+        match self {
+            ProcessorMsgsAddMsgsError::Outbound { err } => err.scope(),
+            ProcessorMsgsAddMsgsError::Msgs { err } => err.scope()
+        }
+    }
+}
+
+impl<Outbound> Display for ProcessorMsgsAddMsgsError<Outbound>
+where
+    Outbound: Display
+{
+    fn fmt(
+        &self,
+        f: &mut Formatter<'_>
+    ) -> Result<(), Error> {
+        match self {
+            ProcessorMsgsAddMsgsError::Outbound { err } => err.fmt(f),
+            ProcessorMsgsAddMsgsError::Msgs { err } => write!(f, "{}", err)
         }
     }
 }

@@ -16,9 +16,9 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::hash_map::Entry;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Error;
@@ -29,8 +29,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
 
-use constellation_auth::authn::AuthNedDestruct;
 use constellation_auth::authn::AuthNMsgRecv;
+use constellation_auth::authn::AuthNedDestruct;
 use constellation_common::codec::Encoder;
 use constellation_common::config::Create;
 use constellation_common::error::ErrorScope;
@@ -41,8 +41,8 @@ use constellation_common::shutdown::ShutdownFlag;
 use constellation_common::sync::NotifyFlag;
 use constellation_component_common::bus::dispatch::SessionDispatch;
 use constellation_component_common::bus::types::SessionDispatchTypes;
-use constellation_component_common::xact::XactBlobBatchCodec;
 use constellation_component_common::xact::XactBlobBatch;
+use constellation_component_common::xact::XactBlobBatchCodec;
 use constellation_streams::frags::Frags;
 use constellation_streams::large_obj::LargeObjMsgs;
 use constellation_streams::large_obj::LargeObjProtoAddOutboundError;
@@ -53,16 +53,19 @@ use log::error;
 use log::trace;
 use log::warn;
 
-use crate::state::PeerState;
 use crate::state::ConsensusRoundID;
+use crate::state::PeerState;
 use crate::types::ClientsMsgTypes;
 
 pub(crate) struct ClientSessionDispatch<Types>
 where
     Types: ClientsMsgTypes {
-    sessions: Arc<Mutex<HashMap<Types::ClientsPrin,
-                                ClientSession<Types::ConsensusHashID>>>>,
-    state: Arc<PeerState<Types>>,
+    sessions: Arc<
+        Mutex<
+            HashMap<Types::ClientsPrin, ClientSession<Types::ConsensusHashID>>
+        >
+    >,
+    state: Arc<PeerState<Types>>
 }
 
 #[derive(Clone)]
@@ -70,8 +73,11 @@ pub struct ClientSessionRecv<Types>
 where
     Types: ClientsMsgTypes {
     state: Arc<PeerState<Types>>,
-    sessions: Arc<Mutex<HashMap<Types::ClientsPrin,
-                                ClientSession<Types::ConsensusHashID>>>>
+    sessions: Arc<
+        Mutex<
+            HashMap<Types::ClientsPrin, ClientSession<Types::ConsensusHashID>>
+        >
+    >
 }
 
 #[derive(Clone)]
@@ -115,18 +121,25 @@ pub enum ClientSessionRecvError<Prin> {
 
 impl<Types> SessionDispatchTypes for ClientsSessionDispatchTypes<Types>
 where
-    Types: ClientsMsgTypes {
-    type SessionPrin = Types::ClientsPrin;
+    Types: ClientsMsgTypes
+{
     type Msgs = ClientSessionMsgs<Types>;
     type Recv = ClientSessionRecv<Types>;
+    type SessionPrin = Types::ClientsPrin;
 }
 
-impl<Types> LargeObjMsgs<
-    Types::ConsensusHash,
-    XactBlobBatch<ConsensusRoundID, Types::ConsensusHashID, Types::ConsensusSeal>
-> for ClientSessionMsgs<Types>
+impl<Types>
+    LargeObjMsgs<
+        Types::ConsensusHash,
+        XactBlobBatch<
+            ConsensusRoundID,
+            Types::ConsensusHashID,
+            Types::ConsensusSeal
+        >
+    > for ClientSessionMsgs<Types>
 where
-    Types: ClientsMsgTypes {
+    Types: ClientsMsgTypes
+{
     type AddMsgsError<Encode>
         = WithMutexPoison<LargeObjProtoAddOutboundError<Encode>>
     where
@@ -136,18 +149,25 @@ where
         &mut self,
         sender: &mut LargeObjSender<
             Types::ConsensusHash,
-            XactBlobBatch<ConsensusRoundID,
-                          Types::ConsensusHashID,
-                          Types::ConsensusSeal>,
+            XactBlobBatch<
+                ConsensusRoundID,
+                Types::ConsensusHashID,
+                Types::ConsensusSeal
+            >,
             WrapperCodec,
             F
         >
     ) -> Result<Option<Instant>, Self::AddMsgsError<WrapperCodec::EncodeError>>
     where
-        WrapperCodec: Clone + Create
-        + Encoder<XactBlobBatch<ConsensusRoundID,
-                                Types::ConsensusHashID,
-                                Types::ConsensusSeal>>,
+        WrapperCodec: Clone
+            + Create
+            + Encoder<
+                XactBlobBatch<
+                    ConsensusRoundID,
+                    Types::ConsensusHashID,
+                    Types::ConsensusSeal
+                >
+            >,
         WrapperCodec::Config: Default,
         F: Frags {
         let prin = self.prin.clone();
@@ -197,13 +217,11 @@ where
     }
 }
 
-impl<Types> AuthNMsgRecv<
-    Types::ClientsPrin,
-    Types::ClientsAuthMsg
->
+impl<Types> AuthNMsgRecv<Types::ClientsPrin, Types::ClientsAuthMsg>
     for ClientSessionRecv<Types>
 where
-    Types: ClientsMsgTypes {
+    Types: ClientsMsgTypes
+{
     /// Errors that can occur reporting messages.
     type RecvError = ClientSessionRecvError<Types::ClientsPrin>;
 
@@ -275,10 +293,9 @@ where
 
 impl<Types> ClientSessionDispatch<Types>
 where
-    Types: ClientsMsgTypes {
-    pub(crate) fn new(
-        state: Arc<PeerState<Types>>
-    ) -> Self {
+    Types: ClientsMsgTypes
+{
+    pub(crate) fn new(state: Arc<PeerState<Types>>) -> Self {
         let sessions = Arc::new(Mutex::new(HashMap::new()));
 
         ClientSessionDispatch {
@@ -295,12 +312,18 @@ where
 {
     type SessionError = ClientSessionDispatchError<
         Types::ClientsPrin,
-        <XactBlobBatchCodec<u128, Types::ConsensusHash,
-                            Types::ConsensusSeal,
-                            Types::ConsensusSealCodec> as Create>::CreateError,
-        <XactBlobBatchCodec<u128, Types::ConsensusHash,
-                            Types::ConsensusSeal,
-                            Types::ConsensusSealCodec> as Create>::CreateError,
+        <XactBlobBatchCodec<
+            u128,
+            Types::ConsensusHash,
+            Types::ConsensusSeal,
+            Types::ConsensusSealCodec
+        > as Create>::CreateError,
+        <XactBlobBatchCodec<
+            u128,
+            Types::ConsensusHash,
+            Types::ConsensusSeal,
+            Types::ConsensusSealCodec
+        > as Create>::CreateError,
         Types::ConsensusIDsCreateError
     >;
 
@@ -366,8 +389,7 @@ where
         match self {
             ClientSessionDispatchError::Proto { err } => err.scope(),
             ClientSessionDispatchError::Exists { .. } |
-            ClientSessionDispatchError::MutexPoison =>
-                ErrorScope::Unrecoverable
+            ClientSessionDispatchError::MutexPoison => ErrorScope::Unrecoverable
         }
     }
 }

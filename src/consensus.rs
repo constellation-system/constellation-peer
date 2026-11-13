@@ -18,13 +18,16 @@
 
 use std::fmt::Debug;
 use std::fmt::Display;
+use std::fmt::Error;
+use std::fmt::Formatter;
 use std::sync::Arc;
 use std::time::Instant;
 
-use constellation_auth::authn::AuthNedDestruct;
 use constellation_auth::authn::AuthNMsgRecv;
+use constellation_auth::authn::AuthNedDestruct;
 use constellation_common::codec::Encoder;
 use constellation_common::config::Create;
+use constellation_common::error::ErrorScope;
 use constellation_common::error::MutexPoison;
 use constellation_common::error::ScopedError;
 use constellation_common::error::WithMutexPoison;
@@ -37,9 +40,9 @@ use constellation_streams::large_obj::LargeObjSender;
 use log::debug;
 use log::warn;
 
+use crate::state::ConsensusRoundID;
 use crate::state::PeerState;
 use crate::types::ClientsMsgTypes;
-use crate::state::ConsensusRoundID;
 use crate::types::ConsensusMsgTypes;
 
 #[derive(Clone)]
@@ -56,14 +59,30 @@ where
     state: Arc<PeerState<Types>>
 }
 
-impl<Types> LargeObjMsgs<
-    Types::ConsensusHash,
-    ConsensusCtl<ConsensusRoundID, Types::ConsensusHashID, Types::ConsensusSeal>
-> for ConsensusMsgs<Types>
+#[derive(Debug)]
+pub enum ConsensusMsgsAddMsgsError<Outbound> {
+    Msgs {
+        err: WithMutexPoison<std::io::Error>
+    },
+    Outbound {
+        err: Outbound
+    }
+}
+
+impl<Types>
+    LargeObjMsgs<
+        Types::ConsensusHash,
+        ConsensusCtl<
+            ConsensusRoundID,
+            Types::ConsensusHashID,
+            Types::ConsensusSeal
+        >
+    > for ConsensusMsgs<Types>
 where
-    Types: ClientsMsgTypes {
+    Types: ClientsMsgTypes
+{
     type AddMsgsError<Encode>
-        = WithMutexPoison<LargeObjProtoAddOutboundError<Encode>>
+        = ConsensusMsgsAddMsgsError<LargeObjProtoAddOutboundError<Encode>>
     where
         Encode: Debug + Display + ScopedError;
 
@@ -71,28 +90,38 @@ where
         &mut self,
         sender: &mut LargeObjSender<
             Types::ConsensusHash,
-            ConsensusCtl<ConsensusRoundID,
-                         Types::ConsensusHashID,
-                         Types::ConsensusSeal>,
+            ConsensusCtl<
+                ConsensusRoundID,
+                Types::ConsensusHashID,
+                Types::ConsensusSeal
+            >,
             WrapperCodec,
             F
         >
     ) -> Result<Option<Instant>, Self::AddMsgsError<WrapperCodec::EncodeError>>
     where
-        WrapperCodec: Clone + Create
-        + Encoder<ConsensusCtl<ConsensusRoundID,
-                               Types::ConsensusHashID,
-                               Types::ConsensusSeal>>,
+        WrapperCodec: Clone
+            + Create
+            + Encoder<
+                ConsensusCtl<
+                    ConsensusRoundID,
+                    Types::ConsensusHashID,
+                    Types::ConsensusSeal
+                >
+            >,
         WrapperCodec::Config: Default,
         F: Frags {
-        let (submit, next) = self.state.get_consensus_msgs()?;
+        let (submit, next) = self
+            .state
+            .get_consensus_msgs()
+            .map_err(|err| ConsensusMsgsAddMsgsError::Msgs { err: err })?;
 
         if let Some(submit) = submit {
             let submit = ConsensusCtl::Submit(submit);
 
-            sender
-                .add_outbound(&submit)
-                .map_err(|err| WithMutexPoison::Inner { err: err })?;
+            sender.add_outbound(&submit).map_err(|err| {
+                ConsensusMsgsAddMsgsError::Outbound { err: err }
+            })?;
 
             Ok(next)
         } else {
@@ -101,10 +130,8 @@ where
     }
 }
 
-impl<Types> AuthNMsgRecv<
-    Types::ConsensusPrin,
-    Types::ConsensusAuthMsg
-> for ConsensusRecv<Types>
+impl<Types> AuthNMsgRecv<Types::ConsensusPrin, Types::ConsensusAuthMsg>
+    for ConsensusRecv<Types>
 where
     Types: ConsensusMsgTypes + ClientsMsgTypes
 {
@@ -144,24 +171,47 @@ where
 
 impl<Types> ConsensusMsgs<Types>
 where
-    Types: ClientsMsgTypes {
+    Types: ClientsMsgTypes
+{
     #[inline]
-    pub(crate) fn new(
-        state: Arc<PeerState<Types>>
-    ) -> Self {
+    pub(crate) fn new(state: Arc<PeerState<Types>>) -> Self {
         ConsensusMsgs { state: state }
     }
 }
 
 impl<Types> ConsensusRecv<Types>
 where
-    Types: ClientsMsgTypes {
+    Types: ClientsMsgTypes
+{
     #[inline]
-    pub(crate) fn new(
-        state: Arc<PeerState<Types>>
-    ) -> Self {
-        ConsensusRecv {
-            state: state
+    pub(crate) fn new(state: Arc<PeerState<Types>>) -> Self {
+        ConsensusRecv { state: state }
+    }
+}
+
+impl<Outbound> ScopedError for ConsensusMsgsAddMsgsError<Outbound>
+where
+    Outbound: ScopedError
+{
+    fn scope(&self) -> ErrorScope {
+        match self {
+            ConsensusMsgsAddMsgsError::Outbound { err } => err.scope(),
+            ConsensusMsgsAddMsgsError::Msgs { err } => err.scope()
+        }
+    }
+}
+
+impl<Outbound> Display for ConsensusMsgsAddMsgsError<Outbound>
+where
+    Outbound: Display
+{
+    fn fmt(
+        &self,
+        f: &mut Formatter<'_>
+    ) -> Result<(), Error> {
+        match self {
+            ConsensusMsgsAddMsgsError::Outbound { err } => err.fmt(f),
+            ConsensusMsgsAddMsgsError::Msgs { err } => write!(f, "{}", err)
         }
     }
 }

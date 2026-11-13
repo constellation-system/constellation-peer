@@ -16,9 +16,9 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
-use std::convert::Infallible;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::convert::Infallible;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Error;
@@ -55,8 +55,8 @@ use log::info;
 use uuid::Uuid;
 
 use crate::clients::ClientSessionDispatch;
-use crate::config::PeerStateConfig;
 use crate::config::PeerConfig;
+use crate::config::PeerStateConfig;
 use crate::config::ProcessorClassesConfig;
 #[cfg(feature = "standalone")]
 use crate::config::StandaloneConfig;
@@ -70,10 +70,13 @@ use crate::state::ProcessorIdx;
 use crate::types::PeerComponentTypes;
 
 pub struct PeerComponent<Types>
-where Types: PeerComponentTypes {
+where
+    Types: PeerComponentTypes {
     clients_bus: DispatchLargeObjBusStarter<Types::ClientsBusTypes, Types::Ctx>,
-    processors_bus: DispatchLargeObjBusStarter<Types::ProcessorsBusTypes, Types::Ctx>,
-    consensus_bus: MulticastLargeObjBusStarter<Types::ConsensusBusTypes, Types::Ctx>,
+    processors_bus:
+        DispatchLargeObjBusStarter<Types::ProcessorsBusTypes, Types::Ctx>,
+    consensus_bus:
+        MulticastLargeObjBusStarter<Types::ConsensusBusTypes, Types::Ctx>,
     peer_state_config: PeerStateConfig,
     processor_ids: HashMap<Types::ProcessorsPrin, ProcessorIdx>,
     processors: HashMap<Uuid, ProcessorEntry>,
@@ -83,55 +86,47 @@ where Types: PeerComponentTypes {
 }
 
 pub struct PeerComponentCleanup<Types>
-where Types: PeerComponentTypes {
-    consensus_bus_cleanup: MulticastLargeObjBus<Types::ConsensusBusTypes, Types::Ctx>,
-    processors_bus_cleanup: DispatchLargeObjBus<Types::ProcessorsBusTypes, Types::Ctx>,
-    clients_bus_cleanup: DispatchLargeObjBus<Types::ClientsBusTypes, Types::Ctx>
+where
+    Types: PeerComponentTypes {
+    consensus_bus_cleanup:
+        MulticastLargeObjBus<Types::ConsensusBusTypes, Types::Ctx>,
+    processors_bus_cleanup:
+        DispatchLargeObjBus<Types::ProcessorsBusTypes, Types::Ctx>,
+    clients_bus_cleanup:
+        DispatchLargeObjBus<Types::ClientsBusTypes, Types::Ctx>
 }
 
 pub struct PeerComponentErrorCleanup<Types>
-where Types: PeerComponentTypes {
+where
+    Types: PeerComponentTypes {
     shutdown: ShutdownFlag,
-    consensus_bus_cleanup: Option<MulticastLargeObjBus<Types::ConsensusBusTypes, Types::Ctx>>,
-    processors_bus_cleanup: Option<DispatchLargeObjBus<Types::ProcessorsBusTypes, Types::Ctx>>,
-    clients_bus_cleanup: Option<DispatchLargeObjBus<Types::ClientsBusTypes, Types::Ctx>>
+    consensus_bus_cleanup:
+        Option<MulticastLargeObjBus<Types::ConsensusBusTypes, Types::Ctx>>,
+    processors_bus_cleanup:
+        Option<DispatchLargeObjBus<Types::ProcessorsBusTypes, Types::Ctx>>,
+    clients_bus_cleanup:
+        Option<DispatchLargeObjBus<Types::ClientsBusTypes, Types::Ctx>>
 }
 
 #[derive(Debug)]
 pub enum PeerComponentCreateError {
-    IO {
-        err: std::io::Error
-    },
-    Duplicate {
-        class: Uuid,
-        instance: usize
-    }
+    IO { err: std::io::Error },
+    Duplicate { class: Uuid, instance: usize }
 }
 
 #[derive(Debug)]
 pub enum PeerComponentRunError<Processor, Client, Consensus> {
-    ProcessorBus {
-        err: Processor
-    },
-    ClientBus {
-        err: Client
-    },
-    ConsensusBus {
-        err: Consensus
-    },
-    ProcessorStart {
-        err: std::io::Error
-    },
-    ClientStart {
-        err: std::io::Error
-    },
-    ConsensusStart {
-        err: std::io::Error
-    }
+    ProcessorBus { err: Processor },
+    ClientBus { err: Client },
+    ConsensusBus { err: Consensus },
+    ProcessorStart { err: std::io::Error },
+    ClientStart { err: std::io::Error },
+    ConsensusStart { err: std::io::Error }
 }
 
 impl<Types> PeerComponent<Types>
-where Types: 'static + PeerComponentTypes
+where
+    Types: 'static + PeerComponentTypes
 {
     pub fn create(
         config: PeerConfig<
@@ -163,7 +158,7 @@ where Types: 'static + PeerComponentTypes
             Types::ConsensusResolverConfig,
             Types::ConsensusMsgAuthConfig
         >,
-        ctx: Types::Ctx,
+        ctx: Types::Ctx
     ) -> Result<Self, PeerComponentCreateError> {
         let (
             clients_config,
@@ -173,25 +168,22 @@ where Types: 'static + PeerComponentTypes
         ) = config.take();
         let (processors_bus_config, classes_config) = processors_config.take();
         let (processors_bus, processors_notify) =
-            DispatchLargeObjBusStarter::create(processors_bus_config, ctx.clone())
-                .map_err(|err| PeerComponentCreateError::IO {
-                    err: err
-                })?;
+            DispatchLargeObjBusStarter::create(
+                processors_bus_config,
+                ctx.clone()
+            )
+            .map_err(|err| PeerComponentCreateError::IO { err: err })?;
         let clients_bus_config = clients_config.take();
-        let (clients_bus, clients_notify) = DispatchLargeObjBusStarter::create(
-            clients_bus_config,
-            ctx.clone()
-        )
-            .map_err(|err| PeerComponentCreateError::IO {
-                err: err
-            })?;
+        let (clients_bus, clients_notify) =
+            DispatchLargeObjBusStarter::create(clients_bus_config, ctx.clone())
+                .map_err(|err| PeerComponentCreateError::IO { err: err })?;
         let consensus_bus_config = consensus_config.take();
         let (consensus_bus, consensus_notify) =
-            MulticastLargeObjBusStarter::create(consensus_bus_config,
-                                                ctx.clone())
-                .map_err(|err| PeerComponentCreateError::IO {
-                    err: err
-                })?;
+            MulticastLargeObjBusStarter::create(
+                consensus_bus_config,
+                ctx.clone()
+            )
+            .map_err(|err| PeerComponentCreateError::IO { err: err })?;
         let ProcessorClassesConfig::Static {
             stat: processor_configs
         } = classes_config;
@@ -203,23 +195,32 @@ where Types: 'static + PeerComponentTypes
         // Build the configuration structure for processors.
         for processor_config in processor_configs {
             let (prin, class_configs) = processor_config.take();
+
+            debug!(target: "peer-standalone",
+                   "registering transaction classes for processor {}",
+                   prin);
+
             let id = match processor_ids.get(&prin) {
                 Some(id) => id.clone(),
                 None => {
                     let idx = ProcessorIdx::from(curr_id);
 
                     curr_id += 1;
-                    processor_ids.insert(prin, idx.clone());
+                    processor_ids.insert(prin.clone(), idx.clone());
 
                     idx
                 }
             };
 
             for class_config in class_configs {
-                let (class, instances, versions) = class_config.take();
+                let (classname, instances, versions) = class_config.take();
                 let versions = versions.into_iter().map(|config| config.into());
-                let class: Uuid = class.into();
+                let class: Uuid = classname.into();
                 let instance = InstanceEntry::new(id.clone(), versions);
+
+                debug!(target: "peer-standalone",
+                       "registering transaction class {} for processor {}",
+                       class, prin);
 
                 match classes.entry(class) {
                     Entry::Vacant(ent) => {
@@ -236,10 +237,12 @@ where Types: 'static + PeerComponentTypes
                                 .insert(i as u64, instance.clone())
                                 .is_some()
                             {
-                                return Err(PeerComponentCreateError::Duplicate {
-                                    instance: i,
-                                    class: class
-                                })
+                                return Err(
+                                    PeerComponentCreateError::Duplicate {
+                                        instance: i,
+                                        class: class
+                                    }
+                                );
                             }
                         }
                     }
@@ -265,7 +268,7 @@ where Types: 'static + PeerComponentTypes
             processors: processors,
             processors_notify: processors_notify,
             consensus_notify: consensus_notify,
-            clients_notify: clients_notify,
+            clients_notify: clients_notify
         })
     }
 
@@ -274,22 +277,24 @@ where Types: 'static + PeerComponentTypes
         shutdown: ShutdownFlag
     ) -> Result<
         PeerComponentCleanup<Types>,
-        (PeerComponentErrorCleanup<Types>,
-         PeerComponentRunError<
-             WithMutexPoison<std::io::Error>,
-             WithMutexPoison<std::io::Error>,
-             MulticastLargeObjBusCreateError<
-                 Types::ConsensusHashCreateError,
-                 Types::ConsensusMsgAuthCreateError,
-                 LargeObjProtoCreateError<
-                     Infallible,
-                     Infallible,
-                     Types::ConsensusIDsCreateError
-                 >,
-                 MutexPoison
-             >
-         >)
-    >{
+        (
+            PeerComponentErrorCleanup<Types>,
+            PeerComponentRunError<
+                WithMutexPoison<std::io::Error>,
+                WithMutexPoison<std::io::Error>,
+                MulticastLargeObjBusCreateError<
+                    Types::ConsensusHashCreateError,
+                    Types::ConsensusMsgAuthCreateError,
+                    LargeObjProtoCreateError<
+                        Infallible,
+                        Infallible,
+                        Types::ConsensusIDsCreateError
+                    >,
+                    MutexPoison
+                >
+            >
+        )
+    > {
         let PeerComponent {
             clients_bus,
             processors_bus,
@@ -313,16 +318,16 @@ where Types: 'static + PeerComponentTypes
             clients_notify
         );
         let state = Arc::new(state);
-        let processor_dispatch = ProcessorSessionDispatch::new(
-            processor_ids,
-            state.clone()
-        );
+        let processor_dispatch =
+            ProcessorSessionDispatch::new(processor_ids, state.clone());
         let client_dispatch = ClientSessionDispatch::new(state.clone());
         let consensus_recv = ConsensusRecv::new(state.clone());
         let consensus_msgs = ConsensusMsgs::new(state.clone());
 
         match processors_bus.start(processor_dispatch, shutdown.clone()) {
-            Ok(processors_bus) => match clients_bus.start(client_dispatch, shutdown.clone()) {
+            Ok(processors_bus) => match clients_bus
+                .start(client_dispatch, shutdown.clone())
+            {
                 Ok(clients_bus) => match consensus_bus.start(
                     consensus_recv,
                     consensus_msgs,
@@ -331,7 +336,7 @@ where Types: 'static + PeerComponentTypes
                     Ok((consensus_bus, _)) => Ok(PeerComponentCleanup {
                         consensus_bus_cleanup: consensus_bus,
                         processors_bus_cleanup: processors_bus,
-                        clients_bus_cleanup: clients_bus,
+                        clients_bus_cleanup: clients_bus
                     }),
                     Err(err) => {
                         let cleanup = PeerComponentErrorCleanup {
@@ -340,13 +345,12 @@ where Types: 'static + PeerComponentTypes
                             clients_bus_cleanup: Some(clients_bus),
                             shutdown: shutdown
                         };
-                        let err = PeerComponentRunError::ConsensusBus {
-                            err: err
-                        };
+                        let err =
+                            PeerComponentRunError::ConsensusBus { err: err };
 
                         Err((cleanup, err))
                     }
-                }
+                },
                 Err(err) => {
                     let cleanup = PeerComponentErrorCleanup {
                         consensus_bus_cleanup: None,
@@ -358,7 +362,7 @@ where Types: 'static + PeerComponentTypes
 
                     Err((cleanup, err))
                 }
-            }
+            },
             Err(err) => {
                 let cleanup = PeerComponentErrorCleanup {
                     consensus_bus_cleanup: None,
@@ -375,7 +379,8 @@ where Types: 'static + PeerComponentTypes
 }
 
 impl<Types> PeerComponentErrorCleanup<Types>
-where Types: PeerComponentTypes
+where
+    Types: PeerComponentTypes
 {
     pub fn cleanup(self) {
         let PeerComponentErrorCleanup {
@@ -406,13 +411,14 @@ where Types: PeerComponentTypes
 }
 
 impl<Types> PeerComponentCleanup<Types>
-where Types: PeerComponentTypes
+where
+    Types: PeerComponentTypes
 {
     pub fn cleanup(self) {
         let PeerComponentCleanup {
             clients_bus_cleanup,
             processors_bus_cleanup,
-            consensus_bus_cleanup,
+            consensus_bus_cleanup
         } = self;
 
         clients_bus_cleanup.cleanup();
@@ -420,7 +426,6 @@ where Types: PeerComponentTypes
         consensus_bus_cleanup.cleanup();
     }
 }
-
 
 impl Display for PeerComponentCreateError {
     #[inline]
@@ -430,18 +435,22 @@ impl Display for PeerComponentCreateError {
     ) -> Result<(), Error> {
         match self {
             PeerComponentCreateError::IO { err } => write!(f, "{}", err),
-            PeerComponentCreateError::Duplicate { class, instance } =>
-                write!(f, "duplicate processor for class {}, instance {}",
-                       class, instance)
+            PeerComponentCreateError::Duplicate { class, instance } => write!(
+                f,
+                "duplicate processor for class {}, instance {}",
+                class, instance
+            )
         }
     }
 }
 
 impl<Processor, Client, Consensus> Display
     for PeerComponentRunError<Processor, Client, Consensus>
-where Processor: Display,
-      Client: Display,
-      Consensus: Display {
+where
+    Processor: Display,
+    Client: Display,
+    Consensus: Display
+{
     #[inline]
     fn fmt(
         &self,
@@ -451,12 +460,13 @@ where Processor: Display,
             PeerComponentRunError::ProcessorBus { err } => err.fmt(f),
             PeerComponentRunError::ClientBus { err } => err.fmt(f),
             PeerComponentRunError::ConsensusBus { err } => err.fmt(f),
-            PeerComponentRunError::ProcessorStart { err } =>
-                write!(f, "{}", err),
-            PeerComponentRunError::ClientStart { err } =>
-                write!(f, "{}", err),
-            PeerComponentRunError::ConsensusStart { err } =>
-                write!(f, "{}", err),
+            PeerComponentRunError::ProcessorStart { err } => {
+                write!(f, "{}", err)
+            }
+            PeerComponentRunError::ClientStart { err } => write!(f, "{}", err),
+            PeerComponentRunError::ConsensusStart { err } => {
+                write!(f, "{}", err)
+            }
         }
     }
 }
@@ -491,7 +501,8 @@ pub struct StandaloneCreateErrorCleanup {
 
 #[cfg(feature = "standalone")]
 impl<Types> Standalone for PeerComponent<Types>
-where Types: 'static + PeerComponentTypes<Ctx = StandaloneCtx>
+where
+    Types: 'static + PeerComponentTypes<Ctx = StandaloneCtx>
 {
     type Config = StandaloneConfig<
         Types::ClientsHashConfig,
@@ -540,15 +551,15 @@ where Types: 'static + PeerComponentTypes<Ctx = StandaloneCtx>
                 mut shutdown
             } = cleanup;
 
-            debug!(target: "processor",
+            debug!(target: "peer-standalone-shutdown",
                    "cleaning up caches");
 
             if let Err(err) = shutdown.set() {
-                error!(target: "one-shot",
+                error!(target: "peer-standalone-shutdown",
                        "error setting shutdown flag: {}",
                        err)
             } else if caches_join.join().is_err() {
-                error!(target: "one-shot",
+                error!(target: "peer-standalone-shutdown",
                        "error shutting down name chache threads")
             }
         }
@@ -563,7 +574,7 @@ where Types: 'static + PeerComponentTypes<Ctx = StandaloneCtx>
         let (caches, caches_join) =
             ThreadedNSNameCaches::create(name_caches_config, shutdown.clone())
                 .map_err(|err| {
-                    error!(target: "processor-standalone",
+                    error!(target: "peer-standalone",
                        "error creating name caches: {}",
                        err);
 
@@ -578,7 +589,7 @@ where Types: 'static + PeerComponentTypes<Ctx = StandaloneCtx>
         match PeerComponent::create(component_config, ctx) {
             Ok(out) => Ok((out, cleanup)),
             Err(err) => {
-                error!(target: "consensus-standalone",
+                error!(target: "peer-standalone",
                        "error creating component: {}",
                        err);
 
@@ -592,12 +603,13 @@ where Types: 'static + PeerComponentTypes<Ctx = StandaloneCtx>
 
 #[cfg(feature = "standalone")]
 impl<Types> StandaloneService for PeerComponent<Types>
-where Types: 'static + PeerComponentTypes<Ctx = StandaloneCtx>
+where
+    Types: 'static + PeerComponentTypes<Ctx = StandaloneCtx>
 {
-    const DEFAULT_PIDFILE: &str = "/tmp/constellation-peer.pid";
-
     type RunCleanup = PeerComponentCleanup<Types>;
     type RunErrorCleanup = PeerComponentErrorCleanup<Types>;
+
+    const DEFAULT_PIDFILE: &str = "/tmp/constellation-peer.pid";
 
     fn run(
         self,
@@ -605,7 +617,7 @@ where Types: 'static + PeerComponentTypes<Ctx = StandaloneCtx>
         shutdown: ShutdownFlag
     ) -> Result<Self::RunCleanup, Self::RunErrorCleanup> {
         self.start(shutdown).map_err(|(cleanup, err)| {
-            error!(target: "consensus-standalone",
+            error!(target: "peer-standalone",
                        "error running component: {}",
                        err);
 
@@ -620,7 +632,7 @@ where Types: 'static + PeerComponentTypes<Ctx = StandaloneCtx>
         run_cleanup.cleanup();
 
         if create_cleanup.caches_join.join().is_err() {
-            error!(target: "consensus-standalone-shutdown",
+            error!(target: "peer-standalone-shutdown",
                    "error shutting down name chache threads")
         }
     }
@@ -632,11 +644,11 @@ where Types: 'static + PeerComponentTypes<Ctx = StandaloneCtx>
         run_cleanup.cleanup();
 
         if let Err(err) = create_cleanup.shutdown.set() {
-            error!(target: "consensus-standalone-shutdown",
+            error!(target: "peer-standalone-shutdown",
                    "error setting shutdown flag: {}",
                    err)
         } else if create_cleanup.caches_join.join().is_err() {
-            error!(target: "consensus-standalone-shutdown",
+            error!(target: "peer-standalone-shutdown",
                    "error shutting down name chache threads")
         }
     }

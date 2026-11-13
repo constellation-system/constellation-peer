@@ -76,15 +76,29 @@ pub struct PeerConfig<
     ConsensusIDs: Default,
     ConsensusHash: Default,
     ConsensusResolver: Default,
-    ConsensusEpochs: Default
-{
+    ConsensusEpochs: Default {
     /// Configuration for incoming client connections.
     clients: ClientsConfig<
-        ClientHash, ClientSessAuth, ClientMsgAuth, ClientProtoAuth, ClientUnix, ClientUDP, ClientIDs, ClientEpochs
+        ClientHash,
+        ClientSessAuth,
+        ClientMsgAuth,
+        ClientProtoAuth,
+        ClientUnix,
+        ClientUDP,
+        ClientIDs,
+        ClientEpochs
     >,
     /// Configuration for processors.
     processors: ProcessorsConfig<
-        ProcessorPrin, ProcessorsHash, ProcessorsSessAuth, ProcessorsMsgAuth, ProcessorsProtoAuth, ProcessorsUnix, ProcessorsUDP, ProcessorsIDs, ProcessorsEpochs
+        ProcessorPrin,
+        ProcessorsHash,
+        ProcessorsSessAuth,
+        ProcessorsMsgAuth,
+        ProcessorsProtoAuth,
+        ProcessorsUnix,
+        ProcessorsUDP,
+        ProcessorsIDs,
+        ProcessorsEpochs
     >,
     /// Configuration for consensus.
     consensus: ConsensusConfig<
@@ -175,8 +189,17 @@ pub enum ProcessorClassesConfig<Prin> {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename = "processors-config")]
 #[serde(rename_all = "kebab-case")]
-pub struct ProcessorsConfig<Prin, Hash, SessAuth, MsgAuth, ProtoAuth, Unix, UDP, IDs, Epochs>
-where
+pub struct ProcessorsConfig<
+    Prin,
+    Hash,
+    SessAuth,
+    MsgAuth,
+    ProtoAuth,
+    Unix,
+    UDP,
+    IDs,
+    Epochs
+> where
     Hash: Default,
     Unix: Default,
     UDP: Default,
@@ -198,14 +221,22 @@ where
     >,
     /// Processors for transaction classes.
     #[serde(flatten)]
-    processors: ProcessorClassesConfig<Prin>,
+    processors: ProcessorClassesConfig<Prin>
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename = "clients")]
 #[serde(rename_all = "kebab-case")]
-pub struct ClientsConfig<Hash, SessAuth, MsgAuth, ProtoAuth, Unix, UDP, IDs, Epochs>
-where
+pub struct ClientsConfig<
+    Hash,
+    SessAuth,
+    MsgAuth,
+    ProtoAuth,
+    Unix,
+    UDP,
+    IDs,
+    Epochs
+> where
     Hash: Default,
     UDP: Default,
     Unix: Default,
@@ -224,7 +255,7 @@ where
         (),
         IDs,
         Epochs
-    >,
+    >
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -314,8 +345,7 @@ pub struct StandaloneConfig<
     ConsensusIDs: Default,
     ConsensusHash: Default,
     ConsensusResolver: Default,
-    ConsensusEpochs: Default
-{
+    ConsensusEpochs: Default {
     /// Name cache configuration.
     #[serde(default)]
     name_caches: ThreadedNSNameCachesConfig,
@@ -528,7 +558,8 @@ impl<
     ConsensusEpochs,
     ConsensusResolver,
     ConsensusMsgAuthN
-> PeerConfig<
+>
+    PeerConfig<
         ClientHash,
         ClientSessAuth,
         ClientMsgAuth,
@@ -556,7 +587,8 @@ impl<
         ConsensusEpochs,
         ConsensusResolver,
         ConsensusMsgAuthN
-> where
+    >
+where
     ClientHash: Default,
     ClientUDP: Default,
     ClientUnix: Default,
@@ -577,10 +609,25 @@ impl<
     #[inline]
     pub fn new(
         clients: ClientsConfig<
-            ClientHash, ClientSessAuth, ClientMsgAuth, ClientProtoAuth, ClientUnix, ClientUDP, ClientIDs, ClientEpochs
+            ClientHash,
+            ClientSessAuth,
+            ClientMsgAuth,
+            ClientProtoAuth,
+            ClientUnix,
+            ClientUDP,
+            ClientIDs,
+            ClientEpochs
         >,
         processors: ProcessorsConfig<
-            ProcessorsPrin, ProcessorsHash, ProcessorsSessAuth, ProcessorsMsgAuth, ProcessorsProtoAuth, ProcessorsUnix, ProcessorsUDP, ProcessorsIDs, ProcessorsEpochs
+            ProcessorsPrin,
+            ProcessorsHash,
+            ProcessorsSessAuth,
+            ProcessorsMsgAuth,
+            ProcessorsProtoAuth,
+            ProcessorsUnix,
+            ProcessorsUDP,
+            ProcessorsIDs,
+            ProcessorsEpochs
         >,
         consensus: ConsensusConfig<
             ConsensusPrin,
@@ -608,7 +655,14 @@ impl<
     pub fn clients(
         &self
     ) -> &ClientsConfig<
-        ClientHash, ClientSessAuth, ClientMsgAuth, ClientProtoAuth, ClientUnix, ClientUDP, ClientIDs, ClientEpochs
+        ClientHash,
+        ClientSessAuth,
+        ClientMsgAuth,
+        ClientProtoAuth,
+        ClientUnix,
+        ClientUDP,
+        ClientIDs,
+        ClientEpochs
     > {
         &self.clients
     }
@@ -617,7 +671,15 @@ impl<
     pub fn processors(
         &self
     ) -> &ProcessorsConfig<
-        ProcessorsPrin, ProcessorsHash, ProcessorsSessAuth, ProcessorsMsgAuth, ProcessorsProtoAuth, ProcessorsUnix, ProcessorsUDP, ProcessorsIDs, ProcessorsEpochs
+        ProcessorsPrin,
+        ProcessorsHash,
+        ProcessorsSessAuth,
+        ProcessorsMsgAuth,
+        ProcessorsProtoAuth,
+        ProcessorsUnix,
+        ProcessorsUDP,
+        ProcessorsIDs,
+        ProcessorsEpochs
     > {
         &self.processors
     }
@@ -650,10 +712,25 @@ impl<
         self
     ) -> (
         ClientsConfig<
-            ClientHash, ClientSessAuth, ClientMsgAuth, ClientProtoAuth, ClientUnix, ClientUDP, ClientIDs, ClientEpochs
+            ClientHash,
+            ClientSessAuth,
+            ClientMsgAuth,
+            ClientProtoAuth,
+            ClientUnix,
+            ClientUDP,
+            ClientIDs,
+            ClientEpochs
         >,
         ProcessorsConfig<
-            ProcessorsPrin, ProcessorsHash, ProcessorsSessAuth, ProcessorsMsgAuth, ProcessorsProtoAuth, ProcessorsUnix, ProcessorsUDP, ProcessorsIDs, ProcessorsEpochs
+            ProcessorsPrin,
+            ProcessorsHash,
+            ProcessorsSessAuth,
+            ProcessorsMsgAuth,
+            ProcessorsProtoAuth,
+            ProcessorsUnix,
+            ProcessorsUDP,
+            ProcessorsIDs,
+            ProcessorsEpochs
         >,
         ConsensusConfig<
             ConsensusPrin,
@@ -673,18 +750,8 @@ impl<
     }
 }
 
-impl<
-    Prin,
-    Hash,
-    AuthN,
-    ProtoAuthN,
-    Unix,
-    UDP,
-    IDs,
-    Resolver,
-    Epochs,
-    MsgAuthN
-> ConsensusConfig<
+impl<Prin, Hash, AuthN, ProtoAuthN, Unix, UDP, IDs, Resolver, Epochs, MsgAuthN>
+    ConsensusConfig<
         Prin,
         Hash,
         AuthN,
@@ -695,13 +762,15 @@ impl<
         Resolver,
         Epochs,
         MsgAuthN
-> where
+    >
+where
     UDP: Default,
     Unix: Default,
     IDs: Default,
     Hash: Default,
     Resolver: Default,
-    Epochs: Default {
+    Epochs: Default
+{
     #[inline]
     pub fn new(
         multicast: MulticastLargeObjBusConfig<
@@ -720,7 +789,7 @@ impl<
         >
     ) -> Self {
         ConsensusConfig {
-            multicast: multicast,
+            multicast: multicast
         }
     }
 
@@ -772,7 +841,8 @@ where
     UDP: Default,
     Unix: Default,
     IDs: Default,
-    Epochs: Default {
+    Epochs: Default
+{
     #[inline]
     pub fn new(
         bus: DispatchLargeObjBusConfig<
@@ -788,13 +858,13 @@ where
             Epochs
         >
     ) -> Self {
-        ClientsConfig {
-            bus: bus
-        }
+        ClientsConfig { bus: bus }
     }
 
     #[inline]
-    pub fn bus(&self) -> &DispatchLargeObjBusConfig<
+    pub fn bus(
+        &self
+    ) -> &DispatchLargeObjBusConfig<
         Hash,
         SessAuth,
         MsgAuth,
@@ -829,13 +899,24 @@ where
 }
 
 impl<Prin, Hash, SessAuth, MsgAuth, ProtoAuth, Unix, UDP, IDs, Epochs>
-    ProcessorsConfig<Prin, Hash, SessAuth, MsgAuth, ProtoAuth, Unix, UDP, IDs, Epochs>
+    ProcessorsConfig<
+        Prin,
+        Hash,
+        SessAuth,
+        MsgAuth,
+        ProtoAuth,
+        Unix,
+        UDP,
+        IDs,
+        Epochs
+    >
 where
     Hash: Default,
     Unix: Default,
     UDP: Default,
     IDs: Default,
-    Epochs: Default {
+    Epochs: Default
+{
     #[inline]
     pub fn new(
         bus: DispatchLargeObjBusConfig<
@@ -850,7 +931,7 @@ where
             IDs,
             Epochs
         >,
-        processors: ProcessorClassesConfig<Prin>,
+        processors: ProcessorClassesConfig<Prin>
     ) -> Self {
         ProcessorsConfig {
             processors: processors,
@@ -859,7 +940,9 @@ where
     }
 
     #[inline]
-    pub fn bus(&self) -> &DispatchLargeObjBusConfig<
+    pub fn bus(
+        &self
+    ) -> &DispatchLargeObjBusConfig<
         Hash,
         SessAuth,
         MsgAuth,
@@ -930,35 +1013,37 @@ impl<
     ConsensusEpochs,
     ConsensusResolver,
     ConsensusMsgAuthN
-> StandaloneConfig<
-    ClientHash,
-    ClientSessAuth,
-    ClientMsgAuth,
-    ClientProtoAuth,
-    ClientUnix,
-    ClientUDP,
-    ClientIDs,
-    ClientEpochs,
-    ProcessorPrin,
-    ProcessorsHash,
-    ProcessorsSessAuth,
-    ProcessorsMsgAuth,
-    ProcessorsProtoAuth,
-    ProcessorsUnix,
-    ProcessorsUDP,
-    ProcessorsIDs,
-    ProcessorsEpochs,
-    ConsensusPrin,
-    ConsensusHash,
-    ConsensusAuthN,
-    ConsensusProtoAuthN,
-    ConsensusUnix,
-    ConsensusUDP,
-    ConsensusIDs,
-    ConsensusEpochs,
-    ConsensusResolver,
-    ConsensusMsgAuthN
-> where
+>
+    StandaloneConfig<
+        ClientHash,
+        ClientSessAuth,
+        ClientMsgAuth,
+        ClientProtoAuth,
+        ClientUnix,
+        ClientUDP,
+        ClientIDs,
+        ClientEpochs,
+        ProcessorPrin,
+        ProcessorsHash,
+        ProcessorsSessAuth,
+        ProcessorsMsgAuth,
+        ProcessorsProtoAuth,
+        ProcessorsUnix,
+        ProcessorsUDP,
+        ProcessorsIDs,
+        ProcessorsEpochs,
+        ConsensusPrin,
+        ConsensusHash,
+        ConsensusAuthN,
+        ConsensusProtoAuthN,
+        ConsensusUnix,
+        ConsensusUDP,
+        ConsensusIDs,
+        ConsensusEpochs,
+        ConsensusResolver,
+        ConsensusMsgAuthN
+    >
+where
     ClientHash: Default,
     ClientUDP: Default,
     ClientUnix: Default,
